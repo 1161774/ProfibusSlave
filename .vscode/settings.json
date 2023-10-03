@@ -1,0 +1,14 @@
+{
+  "C_Cpp.intelliSenseEngine": "default",
+  "idf.flashType": "UART",
+  "idf.portWin": "COM6",
+  "files.associations": {
+    "profibus.h": "c",
+    "vsd.h": "c",
+    "list.h": "c",
+    "protocol.h": "c",
+    "string_view": "c",
+    "regex": "c"
+  },
+  "idf.adapterTargetName": "esp32"
+}

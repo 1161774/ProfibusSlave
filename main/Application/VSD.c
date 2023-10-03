@@ -57,7 +57,7 @@ vsd->speedSetpoint += 20;
 void taskEntry(void* pvParameters) {
     VSDSimulator* vsd = (VSDSimulator*)pvParameters;
 
-    vsd->profibusSlave->state = POWERON;
+    vsd->profibusSlave->state = SS_POWERON;
 
     // Register profibus
     AddSlave(vsd->profibusAddress, *vsd->profibusSlave);

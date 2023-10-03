@@ -19,6 +19,7 @@
 #include "sdkconfig.h"
 #include "Application/VSD.h"
 #include "Profibus/Controller.h"
+#include "uart/uartMessage.h"
 
 /**
  * This is a example which echos any data it receives on UART back to the sender using RS485 interface in half duplex mode.
@@ -39,8 +40,12 @@
 
 #define RX_BUF_SIZE        (127)
 #define TX_BUF_SIZE        (127)
+#define RX_QUEUE_LENGTH    (20)
+#define TX_QUEUE_LENGTH    (10)
+
 #define BAUD_RATE       (CONFIG_ECHO_UART_BAUD_RATE)
-static QueueHandle_t uart_queue;
+static QueueHandle_t rxQueue;
+QueueHandle_t txQueue;
 
 // Read packet timeout
 #define PACKET_READ_TICS        (100 / portTICK_PERIOD_MS)
@@ -56,67 +61,28 @@ static QueueHandle_t uart_queue;
 
 const int uart_num = ECHO_UART_PORT;
 
-
-/*
-static void profibus(uint8_t* data, uint32_t length)
+void uart_transmint_task(void *pvParameters) 
 {
-    ESP_LOG_BUFFER_HEX_LEVEL(TAG, data, length, ESP_LOG_DEBUG);
-
-    uint8_t startDelimiter = data[0];
-
-    uint8_t da;
-    uint8_t sa;
-    uint8_t fc;
-    uint8_t fcs;
-    uint8_t ed;
-
-    switch (startDelimiter)
+    resp Response;
+    while (1)
     {
-    case 0x10: // Status query
-
-        da = data[1];
-        sa = data[2];
-        fc = data[3];
-        fcs = data[4];
-        ed = data[5];
-        
-        if(da == 0x10 && fc == 0x49)
+        if (xQueueReceive(txQueue, &Response, (TickType_t)portMAX_DELAY))
         {
-            //ESP_LOG_BUFFER_HEX(TAG, data, length);
-
-            char* resp = "\n";
-            //sprintf((char *)data, "σ");
-            uart_write_bytes(uart_num, (const char*)resp, strlen(resp));
+            ESP_LOG_BUFFER_HEXDUMP("Transmit", Response.Data, Response.Length, ESP_LOG_INFO);
+            uart_write_bytes(uart_num, Response.Data, Response.Length);
         }
-
-        break;
-    case 0x68: // Variable length data
-
-        break;
-
-    case 0xA2: // Fixed length data
-        break;
-
-    case 0xDC: // Token. As a slave, this means nothing to us
-        break;
-    
-    default:
-    ESP_LOGE(TAG, "unknown message - %s", (char*)startDelimiter);
-        break;
     }
-
-}*/
-
+    
+}
 
 static void uart_event_task(void *pvParameters)
 {
     uart_event_t event;
-    size_t buffered_size;
     uint8_t* data = (uint8_t*) malloc(RX_BUF_SIZE+1);
     while (1)
     {
         //Waiting for UART event.
-        if(xQueueReceive(uart_queue, (void * )&event, (TickType_t)portMAX_DELAY)) 
+        if(xQueueReceive(rxQueue, (void * )&event, (TickType_t)portMAX_DELAY)) 
         {
             switch(event.type) {
                 //Event of UART receving data
@@ -125,8 +91,6 @@ static void uart_event_task(void *pvParameters)
                 be full.*/ 
                 case UART_DATA:
                     uart_read_bytes(uart_num, data, event.size, portMAX_DELAY);
-
-                    ESP_LOG_BUFFER_HEXDUMP(TAG, data, event.size, ESP_LOG_DEBUG);
                     ProcessMessage(data, event.size);
 
                     break;
@@ -137,7 +101,7 @@ static void uart_event_task(void *pvParameters)
                     // The ISR has already reset the rx FIFO,
                     // As an example, we directly flush the rx buffer here in order to read more data.
                     uart_flush_input(uart_num);
-                    xQueueReset(uart_queue);
+                    xQueueReset(rxQueue);
                     break;
                 //Event of UART ring buffer full
                 case UART_BUFFER_FULL:
@@ -145,11 +109,13 @@ static void uart_event_task(void *pvParameters)
                     // If buffer full happened, you should consider increasing your buffer size
                     // As an example, we directly flush the rx buffer here in order to read more data.
                     uart_flush_input(uart_num);
-                    xQueueReset(uart_queue);
+                    xQueueReset(rxQueue);
                     break;
                 //Event of UART RX break detected
                 case UART_BREAK:
-                    ESP_LOG_BUFFER_HEXDUMP(TAG, data, event.size, ESP_LOG_INFO);
+//                    ESP_LOGI(TAG, "UART BREAK EVENT:");
+//                    ESP_LOG_BUFFER_HEXDUMP("   Break", data, event.size, ESP_LOG_INFO);
+//                    ProcessMessage(data, event.size);
                     break;
                 //Event of UART parity check error
                 case UART_PARITY_ERR:
@@ -173,13 +139,19 @@ static void uart_event_task(void *pvParameters)
     vTaskDelete(NULL);
 }
 
-
 static void uart_init(void)
 {
 
     // Set UART log level
     esp_log_level_set(TAG, ESP_LOG_DEBUG);
     ESP_LOGI(TAG, "Init 485 driver");
+
+
+    txQueue = xQueueCreate(TX_QUEUE_LENGTH, TX_BUF_SIZE);
+    if (txQueue == NULL) {
+        ESP_LOGE(TAG, "Failed to create UART queue");
+        return;
+    }
 
     uart_config_t uart_config = {
         .baud_rate = 45450,
@@ -191,7 +163,7 @@ static void uart_init(void)
         .source_clk = UART_SCLK_DEFAULT,
     };
 
-    ESP_ERROR_CHECK(uart_driver_install(uart_num, RX_BUF_SIZE * 2, TX_BUF_SIZE * 2, 20, &uart_queue, 0));
+    ESP_ERROR_CHECK(uart_driver_install(uart_num, RX_BUF_SIZE * 2, TX_BUF_SIZE * 2, RX_QUEUE_LENGTH, &rxQueue, 0));
     ESP_ERROR_CHECK(uart_param_config(uart_num, &uart_config));
     ESP_ERROR_CHECK(uart_set_pin(uart_num, ECHO_TEST_TXD, ECHO_TEST_RXD, ECHO_TEST_RTS, ECHO_TEST_CTS));
     ESP_ERROR_CHECK(uart_set_mode(uart_num, UART_MODE_RS485_HALF_DUPLEX));
@@ -211,10 +183,8 @@ void app_main(void)
 
     // Create two VSD simulator instances
     profibusSlave profibus1, profibus2;
-//    VSDSimulator vsd1 = { "VSD1", 1, &profibus1, 0x10, 0.0, 0.0, STOPPED, NULL };
-//    VSDSimulator vsd2 = { "VSD2", 2, &profibus2, 0x11, 0.0, 0.0, STOPPED, NULL };
-    VSDSimulator vsd1 = { "VSD1", 1, 0x10, &profibus1, 0.0, 0.0, STOPPED, NULL };
-    VSDSimulator vsd2 = { "VSD2", 2, 0x11, &profibus2, 0.0, 0.0, STOPPED, NULL };
+    VSDSimulator vsd1 = { "VSD1", 1, 0x08, &profibus1, 0.0, 0.0, STOPPED, NULL };
+    VSDSimulator vsd2 = { "VSD2", 2, 0x0A, &profibus2, 0.0, 0.0, STOPPED, NULL };
 
     // Create mutexes for each VSD
     vsd1.vsdMutex = xSemaphoreCreateMutex();
@@ -222,20 +192,17 @@ void app_main(void)
 
     // Create tasks for each VSD
     xTaskCreate(taskEntry, vsd1.vsdName, 4096, &vsd1, vsd1.vsdPriority, NULL);
-    xTaskCreate(taskEntry, vsd2.vsdName, 4096, &vsd2, vsd2.vsdPriority, NULL);
+//    xTaskCreate(taskEntry, vsd2.vsdName, 4096, &vsd2, vsd2.vsdPriority, NULL);
 
     // Simulate receiving Profibus commands for the first VSD (vsd1)
-    processProfibusCommand(&vsd1, "SET_SPEED 50.0");
-    processProfibusCommand(&vsd1, "START");
+ //   processProfibusCommand(&vsd1, "SET_SPEED 50.0");
+ //   processProfibusCommand(&vsd1, "START");
 
-    // Simulate receiving Profibus commands for the second VSD (vsd2)
-    processProfibusCommand(&vsd2, "SET_SPEED 75.0");
-    processProfibusCommand(&vsd2, "START");
-
-
+ 
     uart_init();
 
     xTaskCreate(uart_event_task, "uart_event_task", 4096, NULL, configMAX_PRIORITIES, NULL);
+    xTaskCreate(uart_transmint_task, "uart_transmit_task", 4096, NULL, configMAX_PRIORITIES, NULL);
 
 while (1)
 {

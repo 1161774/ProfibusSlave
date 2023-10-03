@@ -2,16 +2,21 @@
 #define PROFIBUS_CONTROLLER_H
 
 #include <stdint.h>
+#include <string.h>
 #include "freertos/FreeRTOS.h"
-#include "freertos/list.h"
+#include "freertos/queue.h"
 #include "esp_log.h"
 #include "Protocol.h"
 #include "Slave.h"
 #include "Utility/list.h"
+#include "uart/uartMessage.h"
 
 #define TAG_PROFIBUSCONTROLLER "Profibus Controller"
 
 extern Node* ProfibusSlaves;
+extern QueueHandle_t txQueue;
+
+
 
 uint8_t InitialiseController(void);
 

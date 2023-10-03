@@ -4,10 +4,10 @@
 #include <stdint.h>
 
 typedef enum {
-    POWERON,    // Power On
-    WPRM,       // Wait for Parameter
-    WCFG,       // Wait for Configuration
-    DXCHG       // Ready for Data Exchange
+    SS_POWERON,    // Power On
+    SS_WPRM,       // Wait for Parameter
+    SS_WCFG,       // Wait for Configuration
+    SS_DXCHG       // Ready for Data Exchange
 } profibusSlaveState;
 
 typedef struct {
