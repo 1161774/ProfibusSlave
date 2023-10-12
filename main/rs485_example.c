@@ -191,8 +191,8 @@ void app_main(void)
     vsd2.vsdMutex = xSemaphoreCreateMutex();
 
     // Create tasks for each VSD
-    xTaskCreate(taskEntry, vsd1.vsdName, 4096, &vsd1, vsd1.vsdPriority, NULL);
-//    xTaskCreate(taskEntry, vsd2.vsdName, 4096, &vsd2, vsd2.vsdPriority, NULL);
+//    xTaskCreate(taskEntry, vsd1.vsdName, 4096, &vsd1, vsd1.vsdPriority, NULL);
+    xTaskCreate(taskEntry, vsd2.vsdName, 4096, &vsd2, vsd2.vsdPriority, NULL);
 
     // Simulate receiving Profibus commands for the first VSD (vsd1)
  //   processProfibusCommand(&vsd1, "SET_SPEED 50.0");

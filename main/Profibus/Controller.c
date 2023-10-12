@@ -5,6 +5,7 @@ Node* ProfibusSlaves;
 
 resp Response;
 
+
 uint8_t InitialiseController()
 {
     initializeList(&ProfibusSlaves);
@@ -18,20 +19,23 @@ void ProcessMessage(uint8_t *pMessageData, uint32_t Length)
     void* slaveData = NULL;
     profibusSlave* slave = NULL;
 
-    uint8_t messageType, destinationAddress, sourceAddress;
+    ProfibusMessage message;
+    memset(message.PDU, 0, sizeof(message.PDU));
 
-    GetMessageType(pMessageData, Length, &messageType, &sourceAddress, &destinationAddress);
+    GetMessage(pMessageData, Length, &message);
+
 
     // We don't care about SD4 telegrams - we're a slave and have no need to track the token
-    if (messageType == TELEGRAM_TYPE_SD4) return;
+    if (message.MessageType == TELEGRAM_SD4) return;
 
     // Check to see if we're a target recipient - broadcast address or registered slave
     // No need to continue if not addressed to us
-    if( (0x7f & destinationAddress) != 0x7f &&
-        !isInList(ProfibusSlaves, (0x7F & destinationAddress), &slaveData)
-        ) return;
+    bool isBroadcastAddress = (0x80 & message.DstAddress) > 0;
+    bool isRegisteredAddress = isInList(ProfibusSlaves, (0x7F & message.DstAddress), &slaveData);
 
-    ESP_LOG_BUFFER_HEXDUMP("Received", pMessageData, Length, ESP_LOG_INFO);
+    if( !isBroadcastAddress && !isRegisteredAddress ) return;
+
+//    ESP_LOGI(TAG_PROFIBUSCONTROLLER, "Typ:%x, Code:%x, Dst:%x", message.MessageType, message.FunctionCode, message.DstAddress);
 
     // Get the details of the slave being requested
     if(slaveData == NULL)
@@ -48,23 +52,9 @@ void ProcessMessage(uint8_t *pMessageData, uint32_t Length)
     uint8_t permitResponse = 0;
     memset(Response.Data, 0, MAX_RESPONSE);
 
-    switch (messageType)
-    {
-    case TELEGRAM_TYPE_SD1:
-        permitResponse = ProcessTelegramSD1(pMessageData, &slave->state, &Response) == 0 ? 1 : 0;
-        break;
-    
-    case TELEGRAM_TYPE_SD2:
-        // 68 09 09 68 ff 81 44 34  36 5d 00 84 00 0f 16
-        // 68 09 09 68 ff 81 44 34  36 5d 00 68 00 f3 16
-        break;
+//    ESP_LOG_BUFFER_HEXDUMP(TAG_PROFIBUSCONTROLLER, pMessageData, Length, ESP_LOG_INFO);
 
-    case TELEGRAM_TYPE_SD3:
-        break;
-
-    default:
-        break;
-    }
+    permitResponse = ProcessFunction(message, &slave->state, &Response) == 0;
 
     //respond
     if(permitResponse)
