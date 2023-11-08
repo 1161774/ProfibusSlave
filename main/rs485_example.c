@@ -182,12 +182,13 @@ void app_main(void)
     InitialiseController();
 
     // Create two VSD simulator instances
-    profibusSlave profibus1, profibus2;
-    VSDSimulator vsd1 = { "VSD1", 1, 0x08, &profibus1, 0.0, 0.0, STOPPED, NULL };
+//    profibusSlave profibus1
+    profibusSlave profibus2;
+//    VSDSimulator vsd1 = { "VSD1", 1, 0x08, &profibus1, 0.0, 0.0, STOPPED, NULL };
     VSDSimulator vsd2 = { "VSD2", 2, 0x0A, &profibus2, 0.0, 0.0, STOPPED, NULL };
 
     // Create mutexes for each VSD
-    vsd1.vsdMutex = xSemaphoreCreateMutex();
+//    vsd1.vsdMutex = xSemaphoreCreateMutex();
     vsd2.vsdMutex = xSemaphoreCreateMutex();
 
     // Create tasks for each VSD

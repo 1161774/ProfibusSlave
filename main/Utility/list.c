@@ -37,6 +37,7 @@ uint8_t isInList(Node* head, uint8_t value, void** data) {
     while (current != NULL) {
         if (current->index == value) {
             *data = current->data; // Provide the custom data to the caller
+
             return 1; // Value found in the list
         }
         current = current->next;

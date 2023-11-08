@@ -22,6 +22,6 @@ uint8_t InitialiseController(void);
 
 void ProcessMessage(uint8_t *Data, uint32_t Length);
 
-void AddSlave(uint8_t slaveAddress, profibusSlave slave);
+void AddSlave(uint8_t slaveAddress, profibusSlave* slave);
 
 #endif // PROFIBUS_CONTROLLER_H

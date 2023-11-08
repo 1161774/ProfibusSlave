@@ -57,10 +57,18 @@ vsd->speedSetpoint += 20;
 void taskEntry(void* pvParameters) {
     VSDSimulator* vsd = (VSDSimulator*)pvParameters;
 
-    vsd->profibusSlave->state = SS_POWERON;
+    vsd->profibusSlave->State.ReadyState = SS_POWERON;
+    vsd->profibusSlave->State.Frozen = 0;
+    vsd->profibusSlave->State.Sync = 0;
+    
+
+    vsd->profibusSlave->Config.Address = vsd->profibusAddress;
+    vsd->profibusSlave->Config.ID_HIGH = 0x70;
+    vsd->profibusSlave->Config.ID_LOW  = 0x50;
+    
 
     // Register profibus
-    AddSlave(vsd->profibusAddress, *vsd->profibusSlave);
+    AddSlave(vsd->profibusAddress, vsd->profibusSlave);
 
     ESP_LOGI(VSDTag, "Starting VSD %s", vsd->vsdName);
     run(vsd);

@@ -3,7 +3,7 @@
 
 #include <string.h>
 #include <stdint.h>
-#include "Slave.h"
+#include <stdbool.h>
 #include "esp_log.h"
 #include "uart/uartMessage.h"
 
@@ -18,15 +18,20 @@
 //#define TELEGRAM_TYPE_SD3 (0xA2)  // Start Delimiter 3 - 
 //#define TELEGRAM_TYPE_SD4 (0xDC)  // Start Delimiter 4 - 
 
-typedef enum {
+typedef struct profibusSlave profibusSlave; // forward declaration
+
+typedef enum{
     TELEGRAM_SD1 = 0x10,    // Telegram with no payload
     TELEGRAM_SD2 = 0x68,    // Telegram with variable length payload
     TELEGRAM_SD3 = 0xA2,    // Telegram with fixed length payload
     TELEGRAM_SD4 = 0xDC,    // Token Pass
+    TELEGRAM_SC  = 0xE5,
+    TELEGRAM_ED  = 0x16
 } TelegramTypes;
 
-#define TELEGRAM_ED (0x16)  // End Delimiter
-#define TELEGRAM_SC (0xE5)  // Short Confirmation
+
+#define STATE_DXCG(state) ((state) == SS_DXCHG)
+#define BUILD_RESPONSE(struc, val) (struc->Data[struc->Length++] = val);      //pResponse->Data[pResponse->Length++]
 
 typedef enum {
     FC_TE                   = 0x00, // Time Event
@@ -64,17 +69,58 @@ typedef enum {
 
 
 typedef struct {
-    uint8_t SrcAddress;
-    uint8_t DstAddress;
+    uint8_t MasterAddress;
+    uint8_t SlaveAddress;
     TelegramTypes MessageType;
     uint8_t FunctionCode;
     uint8_t PDU[250];
     uint8_t PDULength;
 } ProfibusMessage;
 
+typedef struct {
+    uint8_t reserved0           : 1;
+    uint8_t reserved1           : 1;
+    uint8_t Timebase            : 1;
+    uint8_t reserved3           : 1;
+    uint8_t reserved4           : 1;
+    uint8_t SlaveAsPublisher    : 1;
+    uint8_t SlaveInFailsafe     : 1;
+    uint8_t SlaveinDPV1Mode     : 1;
+} DPV1_Status_1;
+
+typedef struct {
+    uint8_t CheckCfgMode            : 1;
+    uint8_t reserved1               : 1;
+    uint8_t SwitchOnAlarmUpdate     : 1;
+    uint8_t SwitchOnStatusAlarm     : 1;
+    uint8_t SwitchOnVendorAlarm     : 1;
+    uint8_t SwitchOnDiagnosticAlarm : 1;
+    uint8_t SwitchOnProcessAlarm    : 1;
+    uint8_t SwitchOnPlugAlarm       : 1;
+} DPV1_Status_2;
+
+typedef enum{
+    MAX_ALARM_1,
+    MAX_ALARM_2,
+    MAX_ALARM_4,
+    MAX_ALARM_8,
+    MAX_ALARM_12,
+    MAX_ALARM_16,
+    MAX_ALARM_24,
+    MAX_ALARM_32
+} _MaxAlarms;
+
+typedef struct {
+    _MaxAlarms MaxAlarms        : 3;
+    uint8_t PRMStructure        : 1;
+    uint8_t IsochronousMode     : 1;
+    uint8_t reserved5           : 1;
+    uint8_t reserved6           : 1;
+    uint8_t RedundancyEnabled   : 1;
+} DPV1_Status_3;
 
 uint8_t GetMessage(uint8_t* pData, uint32_t Length,  ProfibusMessage* Message);
 
-uint8_t ProcessFunction(ProfibusMessage Message, profibusSlaveState* pState, resp* pResponse);
+uint8_t ProcessFunction(ProfibusMessage Message, profibusSlave* pSlave, resp* pResponse);
 
 #endif // PROFIBUS_PROTOCOL_H

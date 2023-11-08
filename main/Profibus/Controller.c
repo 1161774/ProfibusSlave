@@ -30,12 +30,13 @@ void ProcessMessage(uint8_t *pMessageData, uint32_t Length)
 
     // Check to see if we're a target recipient - broadcast address or registered slave
     // No need to continue if not addressed to us
-    bool isBroadcastAddress = (0x80 & message.DstAddress) > 0;
-    bool isRegisteredAddress = isInList(ProfibusSlaves, (0x7F & message.DstAddress), &slaveData);
+    bool isBroadcastAddress = (0x80 & message.SlaveAddress) > 0;
+    bool isRegisteredAddress = isInList(ProfibusSlaves, (0x7F & message.SlaveAddress), &slaveData);
 
     if( !isBroadcastAddress && !isRegisteredAddress ) return;
 
-//    ESP_LOGI(TAG_PROFIBUSCONTROLLER, "Typ:%x, Code:%x, Dst:%x", message.MessageType, message.FunctionCode, message.DstAddress);
+ //   ESP_LOG_BUFFER_HEXDUMP("Received", pMessageData, Length, ESP_LOG_INFO);
+
 
     // Get the details of the slave being requested
     if(slaveData == NULL)
@@ -48,13 +49,12 @@ void ProcessMessage(uint8_t *pMessageData, uint32_t Length)
         slave = (profibusSlave*)slaveData;
     }
 
+
     // prepare a response...
     uint8_t permitResponse = 0;
     memset(Response.Data, 0, MAX_RESPONSE);
 
-//    ESP_LOG_BUFFER_HEXDUMP(TAG_PROFIBUSCONTROLLER, pMessageData, Length, ESP_LOG_INFO);
-
-    permitResponse = ProcessFunction(message, &slave->state, &Response) == 0;
+    permitResponse = ProcessFunction(message, slave, &Response) == 0;
 
     //respond
     if(permitResponse)
@@ -66,9 +66,9 @@ void ProcessMessage(uint8_t *pMessageData, uint32_t Length)
     if(slaveData == NULL) free(slave);
 }
 
-void AddSlave(uint8_t slaveAddress, profibusSlave slave)
+void AddSlave(uint8_t slaveAddress, profibusSlave* slave)
 {
     ESP_LOGI(TAG_PROFIBUSCONTROLLER, "Adding slave %d", slaveAddress);
 
-    addToList(&ProfibusSlaves, slaveAddress, &slave);
+    addToList(&ProfibusSlaves, slaveAddress, slave);
 }
