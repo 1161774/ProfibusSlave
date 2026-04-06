@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "esp_log.h"
-#include "uart/uartMessage.h"
+#include "UART/uartMessage.h"
 
 #define TAG_PROTOCOL "Profibus Protocol"
 

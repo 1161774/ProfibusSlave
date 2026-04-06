@@ -10,5 +10,7 @@
     "string_view": "c",
     "regex": "c"
   },
-  "idf.adapterTargetName": "esp32"
+  "idf.adapterTargetName": "esp32",
+  "idf.currentSetup": "/home/benji/.espressif/v6.0/esp-idf",
+  "idf.port": "/dev/ttyUSB5"
 }

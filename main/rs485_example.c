@@ -19,7 +19,7 @@
 #include "sdkconfig.h"
 #include "Application/VSD.h"
 #include "Profibus/Controller.h"
-#include "uart/uartMessage.h"
+#include "UART/uartMessage.h"
 
 /**
  * This is a example which echos any data it receives on UART back to the sender using RS485 interface in half duplex mode.
@@ -202,8 +202,8 @@ void app_main(void)
  
     uart_init();
 
-    xTaskCreate(uart_event_task, "uart_event_task", 4096, NULL, configMAX_PRIORITIES, NULL);
-    xTaskCreate(uart_transmint_task, "uart_transmit_task", 4096, NULL, configMAX_PRIORITIES, NULL);
+    xTaskCreate(uart_event_task, "uart_event_task", 4096, NULL, 5, NULL);
+    xTaskCreate(uart_transmint_task, "uart_transmit_task", 4096, NULL, 5, NULL);
 
 while (1)
 {

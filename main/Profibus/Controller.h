@@ -9,7 +9,7 @@
 #include "Protocol.h"
 #include "Slave.h"
 #include "Utility/list.h"
-#include "uart/uartMessage.h"
+#include "UART/uartMessage.h"
 
 #define TAG_PROFIBUSCONTROLLER "Profibus Controller"
 
