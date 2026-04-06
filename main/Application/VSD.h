@@ -1,14 +1,11 @@
-
 #ifndef VSD_SIMULATOR_H
 #define VSD_SIMULATOR_H
 
+#include <string.h>
+#include <stdio.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "Profibus/Controller.h"
-
-// Simulated Profibus library (replace with actual Profibus library)
-typedef struct {
-    // Method to simulate receiving a Profibus command
-    void (*receiveCommand)(const char* command);
-} Profibus;
 
 typedef enum {
     RAMPING_UP,
@@ -18,21 +15,17 @@ typedef enum {
 } VSDState;
 
 typedef struct {
-    const char* vsdName;
-    UBaseType_t vsdPriority;
-//    Profibus* profibus;
-    uint8_t profibusAddress;
-    profibusSlave* profibusSlave;
-    float speedSetpoint;
-    float currentSpeed;
-    VSDState state;
+    const char      *vsdName;
+    UBaseType_t      vsdPriority;
+    uint8_t          profibusAddress;
+    profibusSlave   *profibusSlave;
+    float            speedSetpoint;   /* % of rated speed (0-100) */
+    float            currentSpeed;    /* % of rated speed (simulated) */
+    VSDState         state;
     SemaphoreHandle_t vsdMutex;
-
 } VSDSimulator;
 
-
-
-void taskEntry(void* pvParameters);
-void processProfibusCommand(VSDSimulator* vsd, const char* command);
+void taskEntry(void *pvParameters);
+void processProfibusCommand(VSDSimulator *vsd, const char *command);
 
 #endif // VSD_SIMULATOR_H

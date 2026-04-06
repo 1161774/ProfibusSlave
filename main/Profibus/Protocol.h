@@ -9,74 +9,95 @@
 
 #define TAG_PROTOCOL "Profibus Protocol"
 
-//TODO - actually figure out how big to make this buffer
-#define MAX_RESPONSE (512) //255 bytes Should be the longest that a profibus message can be
-
-
-//#define TELEGRAM_TYPE_SD1 (0x10)  // Start Delimiter 1 - 
-//#define TELEGRAM_TYPE_SD2 (0x68)  // Start Delimiter 2 - 
-//#define TELEGRAM_TYPE_SD3 (0xA2)  // Start Delimiter 3 - 
-//#define TELEGRAM_TYPE_SD4 (0xDC)  // Start Delimiter 4 - 
+#define MAX_RESPONSE (512)
 
 typedef struct profibusSlave profibusSlave; // forward declaration
 
-typedef enum{
-    TELEGRAM_SD1 = 0x10,    // Telegram with no payload
-    TELEGRAM_SD2 = 0x68,    // Telegram with variable length payload
-    TELEGRAM_SD3 = 0xA2,    // Telegram with fixed length payload
-    TELEGRAM_SD4 = 0xDC,    // Token Pass
-    TELEGRAM_SC  = 0xE5,
-    TELEGRAM_ED  = 0x16
+/* ------------------------------------------------------------------ */
+/* Frame types (start delimiters)                                     */
+/* ------------------------------------------------------------------ */
+typedef enum {
+    TELEGRAM_SD1 = 0x10,    // Fixed-length, no data
+    TELEGRAM_SD2 = 0x68,    // Variable-length
+    TELEGRAM_SD3 = 0xA2,    // Fixed 8-byte data
+    TELEGRAM_SD4 = 0xDC,    // Token frame
+    TELEGRAM_SC  = 0xE5,    // Short acknowledge
+    TELEGRAM_ED  = 0x16     // End delimiter
 } TelegramTypes;
 
-
-#define STATE_DXCG(state) ((state) == SS_DXCHG)
-#define BUILD_RESPONSE(struc, val) (struc->Data[struc->Length++] = val);      //pResponse->Data[pResponse->Length++]
+/* ------------------------------------------------------------------ */
+/* FC byte — lower nibble = function, upper bits = REQ/FCV/FCB        */
+/* ------------------------------------------------------------------ */
+#define FC_REQ_BIT   0x40   // Set in requests from master
+#define FC_FCV_BIT   0x10   // Frame Count Valid
+#define FC_FCB_BIT   0x20   // Frame Count Bit (alternates each new request)
 
 typedef enum {
-    FC_TE                   = 0x00, // Time Event
-    FC_SEND_DATA_ACK_LOW    = 0x03, // Send Data, Request Acknowledge, Low Priority
-    FC_SEND_DATA_NACK_LOW   = 0x04, // Send Data, No Acknowledge, Low Priority
-    FC_SEND_DATA_ACK_HIG    = 0x05, // Send Data, Request Acknowledge, High Priority
-    FC_SEND_DATA_NACK_HIG   = 0x06, // Send Data, No Acknowledge, High Priority
-    FC_MSRD                 = 0x07, // Send Request Data with Multicast Reply
-    FC_CV                   = 0x08, // Clock Value
-    FC_FDL_STATUS           = 0x09, // Fieldbus Data Later Status
-    FC_SRD_LOW              = 0x0C, // Send and Request Data, Low Priority
-    FC_SRD_HIGH             = 0x0D, // Send and Request Data, High Priority
-    FC_REQ_ID_REPL          = 0x0E, // Request Identity With Reply
-    FC_REQ_LSAP_REPL        = 0x0F, // Request LSAP Status With Reply
+    FC_TE                = 0x00, // Time Event
+    FC_SEND_DATA_ACK_LOW = 0x03, // Send Data with Acknowledge, low priority
+    FC_SEND_DATA_NACK_LOW= 0x04, // Send Data, No Acknowledge, low priority
+    FC_SEND_DATA_ACK_HIG = 0x05, // Send Data with Acknowledge, high priority
+    FC_SEND_DATA_NACK_HIG= 0x06, // Send Data, No Acknowledge, high priority (broadcast)
+    FC_MSRD              = 0x07, // Send Request with Multicast Reply
+    FC_CV                = 0x08, // Clock Value
+    FC_FDL_STATUS        = 0x09, // FDL Status
+    FC_SRD_LOW           = 0x0C, // Send and Request Data, low priority
+    FC_SRD_HIGH          = 0x0D, // Send and Request Data, high priority
+    FC_REQ_ID_REPL       = 0x0E, // Request Identity
+    FC_REQ_LSAP_REPL     = 0x0F, // Request LSAP Status
 } FunctionCodes;
 
-typedef enum {
-    FRH_SLAVE               = 0x00, // Slave
-    FRH_MASTER_NOT_READY    = 0x01, // Master, not ready
-    FRH_MASTER_REQ_TOKEN    = 0x02, // Master, ready, without token
-    FRH_MASTER_READY        = 0x03, // Master, ready, with token
-} FunctionCodeResponsesHigh;
+/* Response FC byte: high nibble encodes slave type + data status */
+#define FC_RESP_SLAVE_DL   0x08  // Slave, Data Low (no high-priority data pending)
+#define FC_RESP_SLAVE_DH   0x0A  // Slave, Data High
 
-typedef enum {
-    FRL_OK = 0x00,  // OK
-    FRL_UE = 0x01,  // User Error
-    FRL_NR = 0x02,  // No Resources
-    FRL_RS = 0x03,  // SAP Not Enabled
-    FRL_DL = 0x08,  // Data low 
-    FRL_NRD = 0x09,  // No response data ready
-    FRL_DH  = 0x0A,  // Data high
-    FRL_RDL = 0x0C, // Data not received and data low
-    FRL_RDH = 0x0D, // Data not received and data high
-} FunctionCodeResponsesLow;
+/* ------------------------------------------------------------------ */
+/* PROFIBUS-DP Service Access Points (SAP numbers)                    */
+/* ------------------------------------------------------------------ */
+#define SAP_BIT         0x80    // Bit 7 of DA/SA signals SAP extension follows
+#define SAP_DATA_EXCH   0x3E    // 62: Default cyclic Data_Exchange
+#define SAP_SLAVE_DIAG  0x3C    // 60: Slave_Diag
+#define SAP_GLB_CTRL    0x3D    // 61: Global_Control (broadcast)
+#define SAP_SET_PRM     0x32    // 50: Set_Prm (parametrisation)
+#define SAP_CHK_CFG     0x33    // 51: Chk_Cfg (configuration check)
 
+/* ------------------------------------------------------------------ */
+/* Helper macro — append one byte to a response buffer               */
+/* ------------------------------------------------------------------ */
+#define BUILD_RESPONSE(struc, val)  ((struc)->Data[(struc)->Length++] = (val))
 
-typedef struct {
-    uint8_t MasterAddress;
-    uint8_t SlaveAddress;
-    TelegramTypes MessageType;
-    uint8_t FunctionCode;
-    uint8_t PDU[250];
-    uint8_t PDULength;
-} ProfibusMessage;
+/* ------------------------------------------------------------------ */
+/* Diagnostic status bytes (Protocol.c builds these from slave state) */
+/* ------------------------------------------------------------------ */
+/*
+ * Diag byte 1 (Status 1):
+ *  bit0 Station_Not_Existent  (slave sets 0)
+ *  bit1 Station_Not_Ready     (1 = not in Data_Exchange)
+ *  bit2 Cfg_Fault             (1 = Chk_Cfg mismatch)
+ *  bit3 Ext_Diag              (1 = extended diag follows)
+ *  bit4 Not_Supported
+ *  bit5 Invalid_Slave_Resp    (master sets; slave always 0)
+ *  bit6 Prm_Fault             (1 = Set_Prm rejected)
+ *  bit7 Master_Lock           (slave always 0)
+ *
+ * Diag byte 2 (Status 2):
+ *  bit0 Prm_Req               (slave requests re-parametrisation)
+ *  bit1 Stat_Diag             (master must keep requesting diag)
+ *  bit2 Always 1
+ *  bit3 WD_On                 (1 = watchdog active)
+ *  bit4 Freeze_Mode
+ *  bit5 Sync_Mode
+ *  bit6 Reserved (0)
+ *  bit7 Deactivated           (slave always 0)
+ *
+ * Diag byte 3 (Status 3):
+ *  bits 0-6 Reserved (0)
+ *  bit7 Ext_Diag_Overflow
+ */
 
+/* ------------------------------------------------------------------ */
+/* DPV1 parameter bytes (in Set_Prm PDU)                             */
+/* ------------------------------------------------------------------ */
 typedef struct {
     uint8_t reserved0           : 1;
     uint8_t reserved1           : 1;
@@ -99,28 +120,46 @@ typedef struct {
     uint8_t SwitchOnPlugAlarm       : 1;
 } DPV1_Status_2;
 
-typedef enum{
-    MAX_ALARM_1,
-    MAX_ALARM_2,
-    MAX_ALARM_4,
-    MAX_ALARM_8,
-    MAX_ALARM_12,
-    MAX_ALARM_16,
-    MAX_ALARM_24,
-    MAX_ALARM_32
+typedef enum {
+    MAX_ALARM_1, MAX_ALARM_2, MAX_ALARM_4,  MAX_ALARM_8,
+    MAX_ALARM_12,MAX_ALARM_16,MAX_ALARM_24, MAX_ALARM_32
 } _MaxAlarms;
 
 typedef struct {
-    _MaxAlarms MaxAlarms        : 3;
-    uint8_t PRMStructure        : 1;
-    uint8_t IsochronousMode     : 1;
-    uint8_t reserved5           : 1;
-    uint8_t reserved6           : 1;
-    uint8_t RedundancyEnabled   : 1;
+    _MaxAlarms MaxAlarms      : 3;
+    uint8_t PRMStructure      : 1;
+    uint8_t IsochronousMode   : 1;
+    uint8_t reserved5         : 1;
+    uint8_t reserved6         : 1;
+    uint8_t RedundancyEnabled : 1;
 } DPV1_Status_3;
 
-uint8_t GetMessage(uint8_t* pData, uint32_t Length,  ProfibusMessage* Message);
+/* ------------------------------------------------------------------ */
+/* Parsed message (output of GetMessage)                              */
+/* ------------------------------------------------------------------ */
+typedef struct {
+    uint8_t       MasterAddress;  // SA from master (stripped of SAP bit)
+    uint8_t       SlaveAddress;   // DA as received (bit7 set = SAP extension)
+    TelegramTypes MessageType;
+    uint8_t       FunctionCode;
+    uint8_t       PDU[250];       // For SAP messages: PDU[0]=DSAP, PDU[1]=SSAP, PDU[2..]=data
+    uint8_t       PDULength;
+} ProfibusMessage;
 
-uint8_t ProcessFunction(ProfibusMessage Message, profibusSlave* pSlave, resp* pResponse);
+/* ------------------------------------------------------------------ */
+/* API                                                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Parse raw bytes into a ProfibusMessage.
+ * Returns 0 on success, non-zero if frame is invalid/unrecognised.
+ */
+uint8_t GetMessage(uint8_t *pData, uint32_t Length, ProfibusMessage *Message);
+
+/**
+ * Process a parsed message and build a response in pResponse.
+ * Returns 0 if a response should be transmitted, non-zero if no response.
+ */
+uint8_t ProcessFunction(ProfibusMessage Message, profibusSlave *pSlave, resp *pResponse);
 
 #endif // PROFIBUS_PROTOCOL_H
