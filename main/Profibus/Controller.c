@@ -69,7 +69,12 @@ void ProcessMessage(uint8_t *pMessageData, uint32_t Length)
     void *slaveData = NULL;
     bool isRegistered = isInList(ProfibusSlaves, targetAddr, &slaveData);
 
-    if (!isBroadcast && !isRegistered) return;
+    
+    //Message isn't for us.
+    if (!isBroadcast && !isRegistered) {
+        ESP_LOGD(TAG_PROFIBUSCONTROLLER, "Not addressed to us (addr=%u (0x%02X))", targetAddr, targetAddr);
+        return;
+    }
 
     if (isBroadcast) {
         /*
@@ -94,6 +99,9 @@ void ProcessMessage(uint8_t *pMessageData, uint32_t Length)
 		        ESP_LOGI(TAG_PROFIBUSCONTROLLER, "Sent %u bytes", Response.Length);
                 xQueueSend(txQueue, &Response, pdMS_TO_TICKS(5));
             }
+            else {
+                ESP_LOGW(TAG_PROFIBUSCONTROLLER, "Didn't send %u bytes", Response.Length);
+            }
 
             cur = cur->next;
         }
@@ -111,6 +119,9 @@ void ProcessMessage(uint8_t *pMessageData, uint32_t Length)
     if (send_response && Response.Length > 0) {
         ESP_LOGI(TAG_PROFIBUSCONTROLLER, "Sent %u bytes", Response.Length);
         xQueueSend(txQueue, &Response, pdMS_TO_TICKS(5));
+    }
+    else {
+        ESP_LOGW(TAG_PROFIBUSCONTROLLER, "Didn't send %u bytes", Response.Length);
     }
 }
 

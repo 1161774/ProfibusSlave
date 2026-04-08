@@ -137,7 +137,11 @@ static void BuildSD2Response(resp *pResponse,
 
 uint8_t GetMessage(uint8_t *pData, uint32_t Length, ProfibusMessage *Message)
 {
-    if (Length < 3) return 1;
+    if (Length < 3) 
+    {
+        ESP_LOGW(TAG_PROTOCOL, "Message too short");
+        return 1;
+    }
 
     Message->MasterAddress = 0;
     Message->SlaveAddress  = 0;
@@ -207,6 +211,9 @@ uint8_t GetMessage(uint8_t *pData, uint32_t Length, ProfibusMessage *Message)
         return 0;
 
     default:
+        ESP_LOGE(TAG_PROTOCOL, "Unhandled Message");
+        ESP_LOG_BUFFER_HEXDUMP(TAG_PROTOCOL, pData, Length, ESP_LOG_ERROR);
+
         return 1;
     }
 }
@@ -526,8 +533,11 @@ static uint8_t HandleDataExchange(ProfibusMessage msg, profibusSlave *s, resp *p
      *   No-SAP frame: PDU[0..] = output bytes
      *   SAP frame:    PDU[0]=DSAP, PDU[1]=SSAP, PDU[2..]=output bytes
      */
+
+     ESP_LOGI(TAG_PROTOCOL, "DExchg");
+
     if (s->State.ReadyState != SS_DXCHG) {
-        ESP_LOGD(TAG_PROTOCOL, "Data_Exchange not in DXCHG (state=%d)",
+        ESP_LOGE(TAG_PROTOCOL, "Data_Exchange not in DXCHG (state=%d)",
                  s->State.ReadyState);
         return HandleSlaveDiag(msg, s, pResponse);
     }
@@ -701,15 +711,12 @@ uint8_t ProcessFunction(ProfibusMessage msg, profibusSlave *s, resp *pResponse)
     uint8_t fc_low = msg.FunctionCode & 0x0F;
 
     ESP_LOGW(TAG_PROTOCOL, "*******************");
-    ESP_LOGI(TAG_PROTOCOL, "Received: slave=%u, fc=0x%02X, Nessage Type=0x%02X", msg.SlaveAddress, msg.FunctionCode, msg.MessageType);
+    ESP_LOGI(TAG_PROTOCOL, "Received: slave=%u, fc=0x%02X, Nessage Type=0x%02X", msg.SlaveAddress & ~SAP_BIT, msg.FunctionCode, msg.MessageType);
     ESP_LOG_BUFFER_HEXDUMP("     PDU:", msg.PDU, msg.PDULength, ESP_LOG_DEBUG);
     
     /* ---- FDL-level services (no SAP extension needed) ---- */
     if (fc_low == FC_FDL_STATUS)  return HandleFDLStatus(msg, s, pResponse);
     if (fc_low == FC_REQ_LSAP_REPL) return HandleReqLSAP(pResponse);
-
-    /* ---- Token frames: ignore ---- */
-    if (msg.MessageType == TELEGRAM_SD4) return 1;
 
     /* ---- No SAP extension: default Data_Exchange ---- */
     bool has_sap = (msg.SlaveAddress & SAP_BIT) != 0;
@@ -727,8 +734,8 @@ uint8_t ProcessFunction(ProfibusMessage msg, profibusSlave *s, resp *pResponse)
     uint8_t dsap = msg.PDU[0] & ~SAP_BIT;
     uint8_t ssap = msg.PDU[1] & ~SAP_BIT;
 
-//    ESP_LOGI(TAG_PROTOCOL, "SAP DSAP=0x%02X SSAP=0x%02X FC=0x%02X state=%d",
-//             dsap, ssap, msg.FunctionCode, s->State.ReadyState);
+    ESP_LOGI(TAG_PROTOCOL, "SAP DSAP=0x%02X SSAP=0x%02X FC=0x%02X state=%d",
+             dsap, ssap, msg.FunctionCode, s->State.ReadyState);
 
     switch (dsap)
     {

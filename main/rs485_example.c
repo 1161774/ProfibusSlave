@@ -195,7 +195,7 @@ void app_main(void)
     VSDSimulator vsd2 = {
         .vsdName        = "VSD2",
         .vsdPriority    = 8,
-        .profibusAddress= 2,
+        .profibusAddress= 10,
         .profibusSlave  = &slave2,
         .speedSetpoint  = 0.0f,
         .currentSpeed   = 0.0f,
