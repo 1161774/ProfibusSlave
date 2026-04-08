@@ -14,6 +14,44 @@ uint8_t InitialiseController()
     return 0;
 }
 
+/*
+ * Classify whether a broadcast-addressed SAP service expects individual
+ * slave responses.
+ *
+ * Most broadcasts (Global_Control, Set_Slave_Add) are fire-and-forget —
+ * no response. But some are discovery probes sent to DA=0xFF where each
+ * slave that recognises itself should respond individually:
+ *
+ *   Get_Cfg   (0x3A) — master probing what config each slave expects
+ *   Slave_Diag (0x3C) — master collecting diagnostics from all slaves
+ *   FDL_Status (FC=0x09, no SAP) — bus presence check
+ *
+ * For these, the broadcast path must still transmit the response built
+ * by ProcessFunction.
+ */
+static bool broadcast_expects_response(const ProfibusMessage *msg)
+{
+    uint8_t fc_low = msg->FunctionCode & 0x0F;
+
+    /* FDL Status (no SAP extension) always responds */
+    if (fc_low == 0x09) return true;
+
+    /* For SAP-extended frames, check DSAP */
+    if (msg->SlaveAddress & SAP_BIT) {
+        if (msg->PDULength < 1) return false;
+        uint8_t dsap = msg->PDU[0] & ~SAP_BIT;
+        switch (dsap) {
+            case 0x3A:  /* Get_Cfg   */
+            case 0x3C:  /* Slave_Diag */
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    return false;
+}
+
 void ProcessMessage(uint8_t *pMessageData, uint32_t Length)
 {
     ProfibusMessage message;
@@ -35,16 +73,28 @@ void ProcessMessage(uint8_t *pMessageData, uint32_t Length)
 
     if (isBroadcast) {
         /*
-         * Broadcast (Global_Control etc.) — deliver to all registered slaves.
-         * No response expected for broadcast services.
+         * Broadcast — deliver to every registered slave.
+         *
+         * Most broadcast services (Global_Control, Set_Slave_Add) require
+         * no response. A few discovery services (Get_Cfg, Slave_Diag) are
+         * addressed to 0xFF but still expect each individual slave to reply
+         * with its own address in the SA field.
          */
+        bool respond = broadcast_expects_response(&message);
+
         Node *cur = ProfibusSlaves;
         while (cur) {
             profibusSlave *slave = (profibusSlave *)cur->data;
             memset(Response.Data, 0, MAX_RESPONSE);
             Response.Length = 0;
-            ProcessFunction(message, slave, &Response);
-            /* No response transmitted for broadcasts */
+
+            uint8_t send = (ProcessFunction(message, slave, &Response) == 0);
+
+            if (respond && send && Response.Length > 0) {
+		        ESP_LOGI(TAG_PROFIBUSCONTROLLER, "Sent %u bytes", Response.Length);
+                xQueueSend(txQueue, &Response, pdMS_TO_TICKS(5));
+            }
+
             cur = cur->next;
         }
         return;
@@ -59,7 +109,7 @@ void ProcessMessage(uint8_t *pMessageData, uint32_t Length)
     uint8_t send_response = (ProcessFunction(message, slave, &Response) == 0);
 
     if (send_response && Response.Length > 0) {
-        ESP_LOG_BUFFER_HEXDUMP("TX", Response.Data, Response.Length, ESP_LOG_DEBUG);
+        ESP_LOGI(TAG_PROFIBUSCONTROLLER, "Sent %u bytes", Response.Length);
         xQueueSend(txQueue, &Response, pdMS_TO_TICKS(5));
     }
 }

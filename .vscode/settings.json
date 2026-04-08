@@ -12,5 +12,5 @@
   },
   "idf.adapterTargetName": "esp32",
   "idf.currentSetup": "/home/benji/.espressif/v6.0/esp-idf",
-  "idf.port": "/dev/ttyUSB5"
+  "idf.port": "/dev/ttyUSB0"
 }

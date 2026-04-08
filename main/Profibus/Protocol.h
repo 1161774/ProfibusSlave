@@ -60,6 +60,8 @@ typedef enum {
 #define SAP_GLB_CTRL    0x3D    // 61: Global_Control (broadcast)
 #define SAP_SET_PRM     0x32    // 50: Set_Prm (parametrisation)
 #define SAP_CHK_CFG     0x33    // 51: Chk_Cfg (configuration check)
+#define SAP_GET_CFG     0x3A    // 58: Get_Cfg (master reads back our config)
+#define SAP_SET_ADDR    0x34    // 52: Set_Slave_Add (address assignment)
 
 /* ------------------------------------------------------------------ */
 /* Helper macro — append one byte to a response buffer               */

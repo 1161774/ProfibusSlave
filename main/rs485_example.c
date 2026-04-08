@@ -220,7 +220,7 @@ void app_main(void)
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(1000));
-        ESP_LOGI(TAG, "Slave2 state=%d speed=%.1f%%",
-                 slave2.State.ReadyState, vsd2.currentSpeed);
+//        ESP_LOGI(TAG, "Slave2 state=%d speed=%.1f%%",
+//                 slave2.State.ReadyState, vsd2.currentSpeed);
     }
 }

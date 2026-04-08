@@ -192,6 +192,13 @@ void taskEntry(void *pvParameters)
     vsd->profibusSlave->State.Frozen     = 0;
     vsd->profibusSlave->State.Sync       = 0;
     vsd->profibusSlave->State.Group      = 0;
+    vsd->profibusSlave->master_address   = 0xFF;
+    vsd->profibusSlave->diag_prm_fault   = 0;
+    vsd->profibusSlave->diag_cfg_fault   = 0;
+    vsd->profibusSlave->cnt_diag         = 0;
+    vsd->profibusSlave->cnt_prm          = 0;
+    vsd->profibusSlave->cnt_cfg          = 0;
+    vsd->profibusSlave->cnt_data_exch    = 0;
 
     /* Identity from kfc750.gsd: Ident_Number = 0x7050 */
     vsd->profibusSlave->Config.Address  = vsd->profibusAddress;
