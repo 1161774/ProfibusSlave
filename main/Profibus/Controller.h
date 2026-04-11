@@ -9,19 +9,14 @@
 #include "Protocol.h"
 #include "Slave.h"
 #include "Utility/list.h"
-#include "UART/uartMessage.h"
+#include "Serial/Serial.h"   /* provides txQueue */
 
-#define TAG_PROFIBUSCONTROLLER "Profibus Controller"
+#include "Logging/pb_log.h"   /* TAG_CONTROLLER and all other shared log tags */
 
-extern Node* ProfibusSlaves;
-extern QueueHandle_t txQueue;
-
-
+extern Node *ProfibusSlaves;
 
 uint8_t InitialiseController(void);
-
-void ProcessMessage(uint8_t *Data, uint32_t Length);
-
-void AddSlave(uint8_t slaveAddress, profibusSlave* slave);
+void    ProcessMessage(uint8_t *Data, uint32_t Length);
+void    AddSlave(uint8_t slaveAddress, profibusSlave *slave);
 
 #endif // PROFIBUS_CONTROLLER_H

@@ -1,14 +1,14 @@
 idf_component_register(
-    SRCS 
-        "rs485_example.c" 
+    SRCS
+        "ProfibusSlaveEmulator.c"
         "Application/VSD.c"
         "Application/ET200S.c"
         "Profibus/Protocol.c"
         "Profibus/Slave.c"
         "Profibus/Controller.c"
+        "Serial/Serial.c"
+        "Logging/pb_log.c"
         "Utility/list.c"
-        "UART/uart.c"
-    INCLUDE_DIRS 
+    INCLUDE_DIRS
         "."
 )
-

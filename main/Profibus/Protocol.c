@@ -324,10 +324,11 @@ static uint8_t HandleSlaveDiag(ProfibusMessage msg, profibusSlave *s, resp *pRes
     diag[5] = s->Config.ID_LOW;
 
     uint8_t diag_len = 6;
-    // if (s->ext_diag_len > 0) {
-    //     memcpy(&diag[6], s->ext_diag_data, s->ext_diag_len);
-    //     diag_len += s->ext_diag_len;
-    // }
+    if (s->ext_diag_len > 0 && s->State.ReadyState == SS_DXCHG) {
+        /* Extended diag only valid once fully configured (matches real ET200S) */
+        memcpy(&diag[6], s->ext_diag_data, s->ext_diag_len);
+        diag_len += s->ext_diag_len;
+    }
 
     BuildSD2Response(pResponse,
                      msg.MasterAddress & ~SAP_BIT,
@@ -336,6 +337,13 @@ static uint8_t HandleSlaveDiag(ProfibusMessage msg, profibusSlave *s, resp *pRes
                      ssap_req,
                      SAP_SLAVE_DIAG,
                      diag, diag_len);
+
+    ESP_LOGD(TAG_PROTOCOL,
+             "Slave_Diag addr=%u state=%d stat=[%02X %02X %02X] ext=%u stat_diag=%u(%u/%u)",
+             s->Config.Address, s->State.ReadyState,
+             diag[0], diag[1], diag[2],
+             s->ext_diag_len, s->diag_stat_diag,
+             s->diag_stat_diag_count, s->diag_stat_diag_threshold);
 
     s->diag_prm_fault = 0;
     s->diag_cfg_fault = 0;
@@ -583,7 +591,7 @@ static uint8_t HandleGetCfg(ProfibusMessage msg, profibusSlave *s, resp *pRespon
                      SAP_GET_CFG,  /* SSAP of response = our SAP        */
                      cfg_src, cfg_len);
 
-    ESP_LOGI(TAG_PROTOCOL, "GetConfig, return %u bytes", pResponse->Length);
+    ESP_LOGD(TAG_PROTOCOL, "GetConfig, return %u bytes", pResponse->Length);
     ESP_LOG_BUFFER_HEXDUMP("Payload:", pResponse->Data, pResponse->Length, ESP_LOG_DEBUG);
     return 0;
 }
@@ -603,7 +611,7 @@ static uint8_t HandleDataExchange(ProfibusMessage msg, profibusSlave *s, resp *p
      *   SAP frame:    PDU[0]=DSAP, PDU[1]=SSAP, PDU[2..]=output bytes
      */
 
-     ESP_LOGI(TAG_PROTOCOL, "DExchg");
+     ESP_LOGD(TAG_PROTOCOL, "DExchg");
 
     if (s->State.ReadyState != SS_DXCHG) {
         ESP_LOGE(TAG_PROTOCOL, "Data_Exchange not in DXCHG (state=%d)",
@@ -701,7 +709,7 @@ static uint8_t HandleFDLStatus(ProfibusMessage msg, profibusSlave *s, resp *pRes
     BUILD_RESPONSE(pResponse, CalcFCS(&pResponse->Data[1], 3));
     BUILD_RESPONSE(pResponse, TELEGRAM_ED);
 
-    ESP_LOGI(TAG_PROTOCOL, "FDL Status, return %u bytes", pResponse->Length);
+    ESP_LOGD(TAG_PROTOCOL, "FDL Status, return %u bytes", pResponse->Length);
     ESP_LOG_BUFFER_HEXDUMP("Payload:", pResponse->Data, pResponse->Length, ESP_LOG_DEBUG);
 
     return 0;
@@ -716,7 +724,7 @@ static uint8_t HandleReqLSAP(resp *pResponse)
     /* Slave acknowledges with SC — we don't support full LSAP reporting */
     BUILD_RESPONSE(pResponse, TELEGRAM_SC);
 
-    ESP_LOGI(TAG_PROTOCOL, "ReqLSAP, return %u bytes", pResponse->Length);
+    ESP_LOGD(TAG_PROTOCOL, "ReqLSAP, return %u bytes", pResponse->Length);
     ESP_LOG_BUFFER_HEXDUMP("Payload:", pResponse->Data, pResponse->Length, ESP_LOG_DEBUG);
 
     return 0;
@@ -760,7 +768,7 @@ static uint8_t HandleSetSlaveAddr(ProfibusMessage msg, profibusSlave *s, resp *p
         return 1;
     }
 
-    ESP_LOGI(TAG_PROTOCOL,
+    ESP_LOGD(TAG_PROTOCOL,
              "Set_Slave_Add: new_addr=%u no_add_chg=%u (not supported, ignored)",
              new_addr, no_add_chg);
 
@@ -829,8 +837,8 @@ uint8_t ProcessFunction(ProfibusMessage msg, profibusSlave *s, resp *pResponse)
 
     uint8_t fc_low = msg.FunctionCode & 0x0F;
 
-    ESP_LOGW(TAG_PROTOCOL, "*******************");
-    ESP_LOGI(TAG_PROTOCOL, "Received: slave=%u, fc=0x%02X, Nessage Type=0x%02X", msg.SlaveAddress & ~SAP_BIT, msg.FunctionCode, msg.MessageType);
+    ESP_LOGD(TAG_PROTOCOL, "*******************");
+    ESP_LOGD(TAG_PROTOCOL, "Received: slave=%u, fc=0x%02X, MessageType=0x%02X", msg.SlaveAddress & ~SAP_BIT, msg.FunctionCode, msg.MessageType);
     ESP_LOG_BUFFER_HEXDUMP("     PDU:", msg.PDU, msg.PDULength, ESP_LOG_DEBUG);
     
     /* ---- FDL-level services (no SAP extension needed) ---- */
@@ -853,7 +861,7 @@ uint8_t ProcessFunction(ProfibusMessage msg, profibusSlave *s, resp *pResponse)
     uint8_t dsap = msg.PDU[0] & ~SAP_BIT;
     uint8_t ssap = msg.PDU[1] & ~SAP_BIT;
 
-    ESP_LOGI(TAG_PROTOCOL, "SAP DSAP=0x%02X SSAP=0x%02X FC=0x%02X state=%d DA=0x%02X",
+    ESP_LOGD(TAG_PROTOCOL, "SAP DSAP=0x%02X SSAP=0x%02X FC=0x%02X state=%d DA=0x%02X",
              dsap, ssap, msg.FunctionCode, s->State.ReadyState, msg.SlaveAddress);
 
     switch (dsap)

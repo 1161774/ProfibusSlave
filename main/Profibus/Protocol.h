@@ -5,11 +5,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "esp_log.h"
-#include "UART/uartMessage.h"
+#include "Serial/Serial.h"     /* resp, MAX_RESPONSE, txQueue */
 
-#define TAG_PROTOCOL "Profibus Protocol"
-
-#define MAX_RESPONSE (512)
+#include "Logging/pb_log.h"   /* TAG_PROTOCOL and all other shared log tags */
 
 typedef struct profibusSlave profibusSlave; // forward declaration
 
