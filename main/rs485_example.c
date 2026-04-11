@@ -205,7 +205,7 @@ void app_main(void)
     vsd2.vsdMutex = xSemaphoreCreateMutex();
 
     /* VSD task runs at lower priority than UART tasks */
-    xTaskCreate(taskEntry, vsd2.vsdName, 4096, &vsd2, vsd2.vsdPriority, NULL);
+//    xTaskCreate(taskEntry, vsd2.vsdName, 4096, &vsd2, vsd2.vsdPriority, NULL);
 
     /* Give the VSD task a moment to register the slave before UART starts */
     vTaskDelay(pdMS_TO_TICKS(10));

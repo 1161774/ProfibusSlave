@@ -57,10 +57,21 @@ void ProcessMessage(uint8_t *pMessageData, uint32_t Length)
     ProfibusMessage message;
     memset(message.PDU, 0, sizeof(message.PDU));
 
-    if (GetMessage(pMessageData, Length, &message) != 0) return;
+    if (GetMessage(pMessageData, Length, &message) != 0) {
+        ESP_LOGE(TAG_PROFIBUSCONTROLLER, "Corrupt Frame");
+        ESP_LOG_BUFFER_HEXDUMP(TAG_PROFIBUSCONTROLLER, pMessageData, Length, ESP_LOG_ERROR);
+        return;
+    }
 
     /* Ignore token frames */
     if (message.MessageType == TELEGRAM_SD4) return;
+
+
+    if (message.MessageType == TELEGRAM_SD1) return;
+
+    ESP_LOG_BUFFER_HEXDUMP("RX", pMessageData, Length, ESP_LOG_INFO);
+
+
 
     /* Determine target address (strip SAP bit) */
     uint8_t targetAddr = message.SlaveAddress & ~SAP_BIT;
@@ -72,7 +83,7 @@ void ProcessMessage(uint8_t *pMessageData, uint32_t Length)
     
     //Message isn't for us.
     if (!isBroadcast && !isRegistered) {
-        ESP_LOGD(TAG_PROFIBUSCONTROLLER, "Not addressed to us (addr=%u (0x%02X))", targetAddr, targetAddr);
+//        ESP_LOGD(TAG_PROFIBUSCONTROLLER, "Not addressed to us (addr=%u (0x%02X))", targetAddr, targetAddr);
         return;
     }
 

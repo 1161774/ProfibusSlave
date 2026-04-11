@@ -54,11 +54,17 @@
 
 #define VSD_TAG "VSD"
 
-/* KFC750 PPO5: 16 bytes each direction (8 PKW + 8 PZD) */
-#define KFC750_IO_LEN   16
-#define PKW_LEN         8   /* bytes 0-7: parameter channel  */
-#define PZD1_OFFSET     8   /* bytes 8-9: control/status word */
-#define PZD2_OFFSET     10  /* bytes 10-11: setpoint/actual   */
+/*
+ * KFC750 PPO5: cfg byte 0xFF = 16 words I/O = 32 bytes each direction
+ *   Bytes  0-15: PKW area (8 words - parameter channel request/response)
+ *   Bytes 16-17: PZD1 - Control Word / Status Word
+ *   Bytes 18-19: PZD2 - Speed Setpoint / Actual Speed
+ *   Bytes 20-31: PZD3-8 (additional process data, zeroed here)
+ */
+#define KFC750_IO_LEN   32
+#define PKW_LEN         16  /* bytes 0-15: parameter channel  */
+#define PZD1_OFFSET     16  /* bytes 16-17: control/status word */
+#define PZD2_OFFSET     18  /* bytes 18-19: setpoint/actual   */
 
 /* Speed scaling: 0x4000 (16384) = 100% of rated speed */
 #define SPEED_SCALE     16384
@@ -193,6 +199,7 @@ void taskEntry(void *pvParameters)
     vsd->profibusSlave->State.Sync       = 0;
     vsd->profibusSlave->State.Group      = 0;
     vsd->profibusSlave->master_address   = 0xFF;
+    vsd->profibusSlave->diag_prm_req     = 1;
     vsd->profibusSlave->diag_prm_fault   = 0;
     vsd->profibusSlave->diag_cfg_fault   = 0;
     vsd->profibusSlave->cnt_diag         = 0;

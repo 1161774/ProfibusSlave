@@ -71,7 +71,21 @@ static uint8_t DiagStatus1(const profibusSlave *s)
  */
 static uint8_t DiagStatus2(const profibusSlave *s)
 {
+    /*
+     * bit0 Prm_Req    — slave is requesting (re-)parametrisation.
+     *                   Must be 1 at power-on and after any fault/reset.
+     *                   Master will not send Set_Prm until this is 1,
+     *                   and will not advance past WAIT_PRM until it is 0.
+     *                   Cleared by a successful Set_Prm.
+     * bit1 Stat_Diag  — slave requests master to keep polling Slave_Diag.
+     *                   We leave this 0 — we don't need continuous polling.
+     * bit2 Always 1   — mandatory per spec.
+     * bit3 WD_On      — watchdog is active.
+     * bit4 Freeze_Mode
+     * bit5 Sync_Mode
+     */
     return (uint8_t)(
+        (s->diag_prm_req            << 0) |
         (1                          << 2) |
         (s->Control.WatchdogStatus  << 3) |
         (s->State.Frozen            << 4) |
@@ -228,6 +242,7 @@ static void ResetToWaitPrm(profibusSlave *s)
     s->State.ReadyState  = SS_WPRM;
     s->prm_len           = 0;
     s->master_address    = 0xFF;
+    s->diag_prm_req      = 1;   /* Signal to master: please re-parametrise */
     /* Leave cfg_data intact so strict mode can re-validate next time */
 }
 
@@ -290,9 +305,15 @@ static uint8_t HandleSlaveDiag(ProfibusMessage msg, profibusSlave *s, resp *pRes
                      SAP_SLAVE_DIAG,    /* SSAP of response = our SAP */
                      diag, sizeof(diag));
 
-    ESP_LOGD(TAG_PROTOCOL, "Slave_Diag state=%d d=[%02X %02X %02X]",
-             s->State.ReadyState, diag[0], diag[1], diag[2]);
-    s->diag_prm_fault = 0;   /* Clear after sending */
+    ESP_LOGI(TAG_PROTOCOL,
+             "Slave_Diag addr=%u state=%d "
+             "DA=0x%02X SA=0x%02X DSAP=0x%02X SSAP=0x%02X "
+             "d=[%02X %02X %02X %02X %02X%02X]",
+             s->Config.Address, s->State.ReadyState,
+             msg.SlaveAddress, msg.MasterAddress, dsap_req, ssap_req,
+             diag[0], diag[1], diag[2], diag[3], diag[4], diag[5]);
+
+    s->diag_prm_fault = 0;
     s->diag_cfg_fault = 0;
     s->cnt_diag++;
     return 0;
@@ -377,6 +398,7 @@ static uint8_t HandleSetPrm(ProfibusMessage msg, profibusSlave *s, resp *pRespon
     }
 
     s->diag_prm_fault    = 0;
+    s->diag_prm_req      = 0;   /* Master can now advance past WAIT_PRM */
     s->State.ReadyState  = SS_WCFG;
     s->cnt_prm++;
 
@@ -439,18 +461,28 @@ static uint8_t HandleChkCfg(ProfibusMessage msg, profibusSlave *s, resp *pRespon
         memcpy(s->cfg_data, cfg_bytes, store_len);
         s->cfg_len = store_len;
 
-        /* Derive I/O sizes from cfg bytes if application hasn't pre-set them */
+        /* Derive I/O sizes from cfg bytes if application hasn't pre-set them.
+         *
+         * Compact format byte (Felser Manual - kompaktes_format.html):
+         *   bit7    = consistency (1=whole module, 0=per byte/word)
+         *   bit6    = unit       (1=words/16-bit,  0=bytes/8-bit)
+         *   bits5:4 = type       (01=input, 10=output, 11=I/O)
+         *   bits3:0 = count-1    (0=1 unit, 15=16 units)
+         *
+         * Byte count = (bits3:0 + 1) * (bit6 ? 2 : 1)
+         */
         if (s->output.len == 0 && s->input.len == 0) {
             uint8_t in_total = 0, out_total = 0;
             for (uint8_t i = 0; i < store_len; i++) {
-                uint8_t b    = cfg_bytes[i];
-                uint8_t type = (b >> 6) & 0x03;
-                uint8_t blen = (b & 0x0F) + 1;
+                uint8_t b     = cfg_bytes[i];
+                uint8_t type  = (b >> 4) & 0x03;  /* bits[5:4] */
+                uint8_t count = (b & 0x0F) + 1;   /* bits[3:0] + 1 */
+                uint8_t words = (b >> 6) & 0x01;  /* bit6: 1=words, 0=bytes */
+                uint8_t blen  = count * (words ? 2u : 1u);
                 if      (type == 0x01) in_total  += blen;
                 else if (type == 0x02) out_total += blen;
                 else if (type == 0x03) { in_total += blen; out_total += blen; }
-                /* type==0x00: special (consistency) byte, add to both by convention */
-                else { in_total += blen; out_total += blen; }
+                /* type==0x00: special format identifier byte — not a data byte */
             }
             s->input.len  = in_total  < PB_MAX_IO_LEN ? in_total  : PB_MAX_IO_LEN;
             s->output.len = out_total < PB_MAX_IO_LEN ? out_total : PB_MAX_IO_LEN;
@@ -701,6 +733,56 @@ static uint8_t HandleSetSlaveAddr(ProfibusMessage msg, profibusSlave *s, resp *p
 
 
 /* ------------------------------------------------------------------ */
+/* SAP 0x38 — Rd_Inp  (read current input data)                      */
+/* ------------------------------------------------------------------ */
+
+static uint8_t HandleRdInp(ProfibusMessage msg, profibusSlave *s, resp *pResponse)
+{
+    /*
+     * Master requests a snapshot of the slave's current input data.
+     * Used by Class 2 masters (engineering tools) for diagnostics.
+     * Available in any state — no state restriction.
+     */
+    uint8_t dsap_req, ssap_req;
+    if (!ParseSAP(&msg, &dsap_req, &ssap_req)) ssap_req = 0x3E;
+
+    BuildSD2Response(pResponse,
+                     msg.MasterAddress & ~SAP_BIT,
+                     s->Config.Address,
+                     FC_RESP_SLAVE_DL,
+                     ssap_req, SAP_RD_INP,
+                     s->input.data, s->input.len);
+
+    ESP_LOGD(TAG_PROTOCOL, "Rd_Inp: returned %u bytes", s->input.len);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* SAP 0x39 — Rd_Outp  (read current output data)                    */
+/* ------------------------------------------------------------------ */
+
+static uint8_t HandleRdOutp(ProfibusMessage msg, profibusSlave *s, resp *pResponse)
+{
+    /*
+     * Master requests a snapshot of the slave's current output data
+     * (what the master last wrote to us). Used for diagnostics.
+     */
+    uint8_t dsap_req, ssap_req;
+    if (!ParseSAP(&msg, &dsap_req, &ssap_req)) ssap_req = 0x3E;
+
+    BuildSD2Response(pResponse,
+                     msg.MasterAddress & ~SAP_BIT,
+                     s->Config.Address,
+                     FC_RESP_SLAVE_DL,
+                     ssap_req, SAP_RD_OUTP,
+                     s->output.data, s->output.len);
+
+    ESP_LOGD(TAG_PROTOCOL, "Rd_Outp: returned %u bytes", s->output.len);
+    return 0;
+}
+
+
+/* ------------------------------------------------------------------ */
 /* ProcessFunction — top-level dispatch                               */
 /* ------------------------------------------------------------------ */
 
@@ -734,31 +816,34 @@ uint8_t ProcessFunction(ProfibusMessage msg, profibusSlave *s, resp *pResponse)
     uint8_t dsap = msg.PDU[0] & ~SAP_BIT;
     uint8_t ssap = msg.PDU[1] & ~SAP_BIT;
 
-    ESP_LOGI(TAG_PROTOCOL, "SAP DSAP=0x%02X SSAP=0x%02X FC=0x%02X state=%d",
-             dsap, ssap, msg.FunctionCode, s->State.ReadyState);
+    ESP_LOGI(TAG_PROTOCOL, "SAP DSAP=0x%02X SSAP=0x%02X FC=0x%02X state=%d DA=0x%02X",
+             dsap, ssap, msg.FunctionCode, s->State.ReadyState, msg.SlaveAddress);
 
     switch (dsap)
     {
-    case SAP_SLAVE_DIAG:    /* 0x3C */
+    case SAP_SLAVE_DIAG:    /* 0x3C - 60 */
         return HandleSlaveDiag(msg, s, pResponse);
 
-    case SAP_SET_PRM:       /* 0x32 */
+    case SAP_SET_PRM:       /* 0x3D - 61 */
         return HandleSetPrm(msg, s, pResponse);
 
-    case SAP_CHK_CFG:       /* 0x33 */
+    case SAP_CHK_CFG:       /* 0x3E - 62 */
         return HandleChkCfg(msg, s, pResponse);
 
-    case SAP_GET_CFG:       /* 0x3A */
+    case SAP_GET_CFG:       /* 0x3B - 59 */
         return HandleGetCfg(msg, s, pResponse);
 
-    case SAP_SET_ADDR:      /* 0x34 */
+    case SAP_SET_ADDR:      /* 0x37 - 55 */
         return HandleSetSlaveAddr(msg, s, pResponse);
 
-    case SAP_DATA_EXCH:     /* 0x3E */
-        return HandleDataExchange(msg, s, pResponse);
-
-    case SAP_GLB_CTRL:      /* 0x3D */
+    case SAP_GLB_CTRL:      /* 0x3A - 58 - broadcast, no response */
         return HandleGlobalControl(msg, s);
+
+    case SAP_RD_INP:        /* 0x38 - 56 */
+        return HandleRdInp(msg, s, pResponse);
+
+    case SAP_RD_OUTP:       /* 0x39 - 57 */
+        return HandleRdOutp(msg, s, pResponse);
 
     default:
         ESP_LOGW(TAG_PROTOCOL,

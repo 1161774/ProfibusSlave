@@ -68,9 +68,13 @@ typedef struct profibusSlave {
     uint8_t cfg_len;
     uint8_t cfg_strict;
 
-    /* Diagnostic fault flags (cleared after Slave_Diag response is sent) */
-    uint8_t diag_prm_fault;   /* Set when Set_Prm is rejected */
-    uint8_t diag_cfg_fault;   /* Set when Chk_Cfg is rejected */
+    /* Diagnostic flags (reflected in Status byte 2 of Slave_Diag response) */
+    uint8_t diag_prm_req;     /* Prm_Req  bit0: 1 = slave needs Set_Prm.
+                                * Must be 1 at power-on. Master will not send
+                                * Set_Prm until this is 1, and checks it is 0
+                                * before advancing past WAIT_PRM state.       */
+    uint8_t diag_prm_fault;   /* Prm_Fault bit6 of Status1: Set_Prm rejected */
+    uint8_t diag_cfg_fault;   /* Cfg_Fault bit2 of Status1: Chk_Cfg rejected */
 
     /* Cyclic I/O buffers.
      *   output: filled by Protocol.c on each Data_Exchange
