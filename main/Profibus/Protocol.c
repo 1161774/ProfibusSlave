@@ -57,8 +57,9 @@ static uint8_t DiagStatus1(const profibusSlave *s)
 {
     uint8_t b = 0;
     if (s->State.ReadyState != SS_DXCHG) b |= 0x02; /* Station_Not_Ready */
-    if (s->diag_prm_fault)               b |= 0x40; /* Prm_Fault         */
     if (s->diag_cfg_fault)               b |= 0x04; /* Cfg_Fault         */
+    if (s->diag_ext_fault)               b |= 0x08; /* Ext_Diag (fault)  */
+    if (s->diag_prm_fault)               b |= 0x40; /* Prm_Fault         */
     return b;
 }
 
@@ -73,12 +74,8 @@ static uint8_t DiagStatus2(const profibusSlave *s)
 {
     /*
      * bit0 Prm_Req    — slave is requesting (re-)parametrisation.
-     *                   Must be 1 at power-on and after any fault/reset.
-     *                   Master will not send Set_Prm until this is 1,
-     *                   and will not advance past WAIT_PRM until it is 0.
-     *                   Cleared by a successful Set_Prm.
      * bit1 Stat_Diag  — slave requests master to keep polling Slave_Diag.
-     *                   We leave this 0 — we don't need continuous polling.
+     *                   Used by ET200S after Chk_Cfg until settled.
      * bit2 Always 1   — mandatory per spec.
      * bit3 WD_On      — watchdog is active.
      * bit4 Freeze_Mode
@@ -86,6 +83,7 @@ static uint8_t DiagStatus2(const profibusSlave *s)
      */
     return (uint8_t)(
         (s->diag_prm_req            << 0) |
+        (s->diag_stat_diag          << 1) |
         (1                          << 2) |
         (s->Control.WatchdogStatus  << 3) |
         (s->State.Frozen            << 4) |
@@ -103,11 +101,15 @@ static uint8_t DiagStatus3(void) { return 0x00; }
 /*
  * Builds a complete SD2 response frame into pResponse.
  *
- *   If dsap != 0 or ssap != 0:  SAP extension bytes are included.
- *   Pass dsap=0, ssap=0 for default (non-SAP) Data_Exchange responses.
+ * Per EN 50170 / Felser PROFIBUS Manual:
+ *   - DA and SA address bytes have bit7 set when a SAP extension is present
+ *     (this signals to the receiver that DSAP+SSAP follow in the PDU).
+ *   - The DSAP and SSAP bytes inside the PDU do NOT have bit7 set.
  *
  * Wire layout:
- *   SD2 | LE | LEr | SD2 | DA[|SAP] | SA[|SAP] | FC | [DSAP | SSAP] | pdu... | FCS | ED
+ *   SD2 | LE | LEr | SD2 | DA[|SAP_BIT] | SA[|SAP_BIT] | FC | [DSAP | SSAP] | pdu... | FCS | ED
+ *
+ * Pass dsap=0 and ssap=0 for non-SAP frames (plain Data_Exchange responses).
  */
 static void BuildSD2Response(resp *pResponse,
                              uint8_t masterAddr, uint8_t slaveAddr,
@@ -119,17 +121,19 @@ static void BuildSD2Response(resp *pResponse,
     bool sap = (dsap | ssap) != 0;
 
     BUILD_RESPONSE(pResponse, TELEGRAM_SD2);
-    BUILD_RESPONSE(pResponse, 0x00);            /* LE placeholder */
+    BUILD_RESPONSE(pResponse, 0x00);            /* LE placeholder  */
     BUILD_RESPONSE(pResponse, 0x00);            /* LEr placeholder */
     BUILD_RESPONSE(pResponse, TELEGRAM_SD2);
 
+    /* DA and SA: set SAP_BIT to signal that DSAP/SSAP follow */
     BUILD_RESPONSE(pResponse, masterAddr | (sap ? SAP_BIT : 0));
     BUILD_RESPONSE(pResponse, slaveAddr  | (sap ? SAP_BIT : 0));
     BUILD_RESPONSE(pResponse, fc);
 
+    /* DSAP and SSAP in the PDU: plain values, no SAP_BIT */
     if (sap) {
-        BUILD_RESPONSE(pResponse, dsap | SAP_BIT);
-        BUILD_RESPONSE(pResponse, ssap | SAP_BIT);
+        BUILD_RESPONSE(pResponse, dsap);
+        BUILD_RESPONSE(pResponse, ssap);
     }
 
     for (uint8_t i = 0; i < pdu_len; i++) {
@@ -142,7 +146,6 @@ static void BuildSD2Response(resp *pResponse,
 
     BUILD_RESPONSE(pResponse, CalcFCS(&pResponse->Data[4], payload_len));
     BUILD_RESPONSE(pResponse, TELEGRAM_ED);
-
 }
 
 /* ------------------------------------------------------------------ */
@@ -239,11 +242,14 @@ uint8_t GetMessage(uint8_t *pData, uint32_t Length, ProfibusMessage *Message)
 static void ResetToWaitPrm(profibusSlave *s)
 {
     ESP_LOGW(TAG_PROTOCOL, "addr=%u → SS_WPRM", s->Config.Address);
-    s->State.ReadyState  = SS_WPRM;
-    s->prm_len           = 0;
-    s->master_address    = 0xFF;
-    s->diag_prm_req      = 1;   /* Signal to master: please re-parametrise */
-    /* Leave cfg_data intact so strict mode can re-validate next time */
+    s->State.ReadyState     = SS_WPRM;
+    s->prm_len              = 0;
+    s->master_address       = 0xFF;
+    s->diag_prm_req         = 1;   /* Signal to master: please re-parametrise */
+    s->diag_stat_diag       = 0;   /* Clear Stat_Diag — station not settled   */
+    s->diag_stat_diag_count = 0;
+    s->diag_ext_fault       = 0;   /* Clear fault ext-diag on reset           */
+    /* Leave cfg_data and ext_diag_data intact for re-validation */
 }
 
 /*
@@ -266,30 +272,50 @@ static bool ParseSAP(const ProfibusMessage *msg, uint8_t *dsap_out, uint8_t *ssa
 static uint8_t HandleSlaveDiag(ProfibusMessage msg, profibusSlave *s, resp *pResponse)
 {
     /*
-     * Response: SD2, 6 mandatory diagnostic bytes:
-     *   [0] Status 1   [1] Status 2   [2] Status 3
-     *   [3] master_address (0xFF if not yet parametrised)
-     *   [4] Ident_Number high
-     *   [5] Ident_Number low
+     * Slave_Diag response structure
+     * ==============================
+     * Always 6 mandatory bytes:
+     *   [0] Status1  [1] Status2  [2] Status3
+     *   [3] master_address (0xFF = unparametrised)
+     *   [4] Ident_Number high  [5] Ident_Number low
      *
-     * Slave advances from POWERON → WPRM on first diag request.
+     * If s->ext_diag_len > 0 these are appended verbatim after byte [5].
+     * Status1 bit3 (Ext_Diag) is set by DiagStatus1() when ext_diag_len > 0.
      *
-     * Response addressing:
-     *   DA  = master's SA  (stripped of SAP bit)
-     *   SA  = our address
-     *   DSAP = master's SSAP (echo back)
-     *   SSAP = SAP_SLAVE_DIAG (0x3C)
+     * Stat_Diag countdown
+     * ====================
+     * When diag_stat_diag=1 the master is required to keep polling.
+     * After diag_stat_diag_threshold consecutive responses we clear the bit,
+     * signalling the master that the station is fully settled.
+     *
+     * This matches the captured ET200S conversation:
+     *   Frames 9,11,13,15: Status2 bit1 = 1  (keep polling)
+     *   Frame 17:          Status2 bit1 = 0  (ready for Data_Exchange)
+     *
+     * Transition POWERON → WPRM on first diag request.
      */
     if (s->State.ReadyState == SS_POWERON)
         s->State.ReadyState = SS_WPRM;
 
-    uint8_t dsap_req, ssap_req;
-    if (!ParseSAP(&msg, &dsap_req, &ssap_req)) {
-        /* Malformed — best effort: use default master SAP */
-        ssap_req = SAP_DATA_EXCH;
+    /* Advance Stat_Diag countdown if active */
+    if (s->diag_stat_diag) {
+        s->diag_stat_diag_count++;
+        if (s->diag_stat_diag_threshold > 0 &&
+            s->diag_stat_diag_count >= s->diag_stat_diag_threshold) {
+            s->diag_stat_diag       = 0;
+            s->diag_stat_diag_count = 0;
+            ESP_LOGI(TAG_PROTOCOL,
+                     "Slave_Diag: Stat_Diag cleared after %u polls",
+                     s->diag_stat_diag_threshold);
+        }
     }
 
-    uint8_t diag[6];
+    uint8_t dsap_req, ssap_req;
+    if (!ParseSAP(&msg, &dsap_req, &ssap_req))
+        ssap_req = SAP_DATA_EXCH;
+
+    /* Build the response PDU: 6 mandatory bytes + optional extended diag */
+    uint8_t diag[6 + PB_MAX_EXT_DIAG_LEN];
     diag[0] = DiagStatus1(s);
     diag[1] = DiagStatus2(s);
     diag[2] = DiagStatus3();
@@ -297,21 +323,19 @@ static uint8_t HandleSlaveDiag(ProfibusMessage msg, profibusSlave *s, resp *pRes
     diag[4] = s->Config.ID_HIGH;
     diag[5] = s->Config.ID_LOW;
 
+    uint8_t diag_len = 6;
+    // if (s->ext_diag_len > 0) {
+    //     memcpy(&diag[6], s->ext_diag_data, s->ext_diag_len);
+    //     diag_len += s->ext_diag_len;
+    // }
+
     BuildSD2Response(pResponse,
                      msg.MasterAddress & ~SAP_BIT,
                      s->Config.Address,
                      FC_RESP_SLAVE_DL,
-                     ssap_req,          /* DSAP of response = master's SSAP */
-                     SAP_SLAVE_DIAG,    /* SSAP of response = our SAP */
-                     diag, sizeof(diag));
-
-    ESP_LOGI(TAG_PROTOCOL,
-             "Slave_Diag addr=%u state=%d "
-             "DA=0x%02X SA=0x%02X DSAP=0x%02X SSAP=0x%02X "
-             "d=[%02X %02X %02X %02X %02X%02X]",
-             s->Config.Address, s->State.ReadyState,
-             msg.SlaveAddress, msg.MasterAddress, dsap_req, ssap_req,
-             diag[0], diag[1], diag[2], diag[3], diag[4], diag[5]);
+                     ssap_req,
+                     SAP_SLAVE_DIAG,
+                     diag, diag_len);
 
     s->diag_prm_fault = 0;
     s->diag_cfg_fault = 0;
@@ -495,6 +519,19 @@ static uint8_t HandleChkCfg(ProfibusMessage msg, profibusSlave *s, resp *pRespon
     s->State.ReadyState = SS_DXCHG;
     s->last_rx_time_ms  = esp_timer_get_time() / 1000LL;
     s->cnt_cfg++;
+
+    /*
+     * Arm Stat_Diag: forces the master to keep polling Slave_Diag until the
+     * slave clears the bit (after diag_stat_diag_threshold polls).
+     * Only arm if the slave has configured a threshold (ET200S sets 4).
+     */
+    if (s->diag_stat_diag_threshold > 0) {
+        s->diag_stat_diag       = 1;
+        s->diag_stat_diag_count = 0;
+        ESP_LOGI(TAG_PROTOCOL,
+                 "Chk_Cfg OK: Stat_Diag armed, will clear after %u polls",
+                 s->diag_stat_diag_threshold);
+    }
 
     ESP_LOGI(TAG_PROTOCOL, "Chk_Cfg OK (%u cfg bytes) → SS_DXCHG  I=%u O=%u",
              cfg_len, s->input.len, s->output.len);

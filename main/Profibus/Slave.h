@@ -75,6 +75,49 @@ typedef struct profibusSlave {
                                 * before advancing past WAIT_PRM state.       */
     uint8_t diag_prm_fault;   /* Prm_Fault bit6 of Status1: Set_Prm rejected */
     uint8_t diag_cfg_fault;   /* Cfg_Fault bit2 of Status1: Chk_Cfg rejected */
+    uint8_t diag_ext_fault;   /* Ext_Diag  bit3 of Status1: fault in ext diag.
+                                * NOTE: Setting this bit is separate from sending
+                                * extended diag bytes (ext_diag_len > 0).
+                                * The real ET200S sends extended module-status bytes
+                                * every cycle (Status1 bit3 = 0, all-OK).
+                                * Only set diag_ext_fault=1 when a genuine module
+                                * fault needs to be signalled to the master.    */
+
+    /*
+     * Stat_Diag (Status2 bit1): slave requests master to keep polling Slave_Diag.
+     *
+     * The real ET200S sets this after a successful Chk_Cfg to force the master
+     * to keep reading diagnostics until the station is fully settled.  After
+     * diag_stat_diag_threshold consecutive Slave_Diag responses the slave clears
+     * the bit, allowing the master to begin cyclic Data_Exchange.
+     *
+     * This matches the captured conversation: Status2=0x0E (Stat_Diag=1) in
+     * frames 9-15, then Status2=0x0C (Stat_Diag=0) in frame 17.
+     *
+     * diag_stat_diag           : 1 = Stat_Diag bit is set in responses
+     * diag_stat_diag_count     : number of diag responses sent with bit set
+     * diag_stat_diag_threshold : clear bit after this many responses (default 4)
+     *
+     * Set diag_stat_diag_threshold = 0 to disable the feature entirely.
+     */
+    uint8_t  diag_stat_diag;
+    uint8_t  diag_stat_diag_count;
+    uint8_t  diag_stat_diag_threshold;
+
+    /*
+     * Extended diagnostic data appended after the 6 mandatory Slave_Diag bytes.
+     *
+     * If ext_diag_len > 0, Protocol.c includes these bytes in every Slave_Diag
+     * response (once the slave is in SS_DXCHG or later).
+     * Status1 bit3 (Ext_Diag) is set automatically when ext_diag_len > 0.
+     *
+     * For the ET200S this contains:
+     *   Block 1 (9 bytes):  49 00 00 00 00 00 00 00 00
+     *   Block 2 (20 bytes): 14 82 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+     */
+#define PB_MAX_EXT_DIAG_LEN  57
+    uint8_t ext_diag_data[PB_MAX_EXT_DIAG_LEN];
+    uint8_t ext_diag_len;
 
     /* Cyclic I/O buffers.
      *   output: filled by Protocol.c on each Data_Exchange

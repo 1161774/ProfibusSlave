@@ -27,6 +27,7 @@
 #include "sdkconfig.h"
 
 #include "Application/VSD.h"
+#include "Application/ET200S.h"
 #include "Profibus/Controller.h"
 #include "UART/uartMessage.h"
 
@@ -67,11 +68,11 @@ static void uart_transmit_task(void *pvParameters)
     resp response;
     while (1) {
         if (xQueueReceive(txQueue, &response, portMAX_DELAY)) {
-            ESP_LOG_BUFFER_HEXDUMP("TX", response.Data, response.Length, ESP_LOG_DEBUG);
+            ESP_LOG_BUFFER_HEXDUMP("TX", response.Data, response.Length, ESP_LOG_INFO);
             uart_write_bytes(uart_num, response.Data, response.Length);
             /* CRITICAL: wait for FIFO to drain before releasing the RS-485 bus.
              * Without this, DE/~RE toggles while bytes are still in the FIFO. */
-            uart_wait_tx_done(uart_num, pdMS_TO_TICKS(TX_DRAIN_WAIT_MS));
+//            uart_wait_tx_done(uart_num, pdMS_TO_TICKS(TX_DRAIN_WAIT_MS));
         }
     }
 }
@@ -184,12 +185,29 @@ void app_main(void)
     InitialiseController();
 
     /*
-     * Create VSD instances.
-     * Each VSD needs its own profibusSlave struct and mutex.
-     * The profibusSlave is registered with the controller in taskEntry().
-     *
-     * profibusAddress must match what's configured in the Siemens master
-     * (HW Config / Network view).
+     * -------------------------------------------------------------------------
+     * ET200S at address 8 — matches the captured hex dump:
+     *   Ident 0x80E0, config 00 10 10 (PM-E + 4DI + 4DI), 2 bytes in / 0 out
+     * -------------------------------------------------------------------------
+     */
+    static profibusSlave et200s_slave;
+    static ET200S_Simulator et200s = {
+        .name            = "ET200S",
+        .profibusAddress = 8,
+        .slave           = &et200s_slave,
+        .inputs          = { .di_card1 = 0x00, .di_card2 = 0x00 },
+        .mutex           = NULL,
+    };
+    et200s.mutex = xSemaphoreCreateMutex();
+
+    xTaskCreate(ET200S_TaskEntry, "et200s", 4096, &et200s,
+                configMAX_PRIORITIES - 2, NULL);
+
+    /*
+     * -------------------------------------------------------------------------
+     * VSD (KFC750) at address 10 — kept for reference, disabled by default.
+     * Uncomment the xTaskCreate line to enable it alongside the ET200S.
+     * -------------------------------------------------------------------------
      */
     static profibusSlave slave2;
     VSDSimulator vsd2 = {
@@ -203,20 +221,20 @@ void app_main(void)
         .vsdMutex       = NULL,
     };
     vsd2.vsdMutex = xSemaphoreCreateMutex();
+    /* xTaskCreate(taskEntry, vsd2.vsdName, 4096, &vsd2, vsd2.vsdPriority, NULL); */
 
-    /* VSD task runs at lower priority than UART tasks */
-//    xTaskCreate(taskEntry, vsd2.vsdName, 4096, &vsd2, vsd2.vsdPriority, NULL);
-
-    /* Give the VSD task a moment to register the slave before UART starts */
-    vTaskDelay(pdMS_TO_TICKS(10));
+    /* Give slave tasks a moment to register before UART starts */
+    vTaskDelay(pdMS_TO_TICKS(50));
 
     uart_init();
 
-    /* UART event task at highest priority — must respond within Tsdx */
-    xTaskCreate(uart_event_task,    "uart_rx",  4096, NULL, configMAX_PRIORITIES - 1, NULL);
-    xTaskCreate(uart_transmit_task, "uart_tx",  4096, NULL, configMAX_PRIORITIES - 1, NULL);
+    /* UART tasks at highest priority — must respond within Tsdr */
+    xTaskCreate(uart_event_task,    "uart_rx", 4096, NULL,
+                configMAX_PRIORITIES - 1, NULL);
+    xTaskCreate(uart_transmit_task, "uart_tx", 4096, NULL,
+                configMAX_PRIORITIES - 1, NULL);
 
-    ESP_LOGI(TAG, "All tasks started");
+    ESP_LOGI(TAG, "All tasks started — ET200S addr=8, ident=0x80E0");
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(1000));

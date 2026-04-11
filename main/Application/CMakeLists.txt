@@ -1,3 +1,7 @@
 
-idf_component_register(SRCS "VSD.c"
-                    INCLUDE_DIRS ".")
+idf_component_register(
+    SRCS 
+        "VSD.c"
+        "ET200S.c"
+    INCLUDE_DIRS 
+        ".")
