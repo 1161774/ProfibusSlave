@@ -79,7 +79,7 @@ static void Configure_Logging(void)
 
     /* Application tasks */
     esp_log_level_set(TAG_ET200S,     ESP_LOG_INFO);
-    esp_log_level_set(TAG_VSD,        ESP_LOG_WARN);
+    esp_log_level_set(TAG_VSD,        ESP_LOG_INFO);
 
     /* Entry point / heartbeat */
     esp_log_level_set(TAG_EMULATOR,   ESP_LOG_INFO);
@@ -131,9 +131,9 @@ void app_main(void)
     xTaskCreate(ET200S_TaskEntry, "et200s", 4096, &et200s_sim,
                 configMAX_PRIORITIES - 2, NULL);
 
-    /* ---- VSD at address 10 (disabled) ---- */
+    /* ---- VSD at address 10 ---- */
     vsd_sim.vsdMutex = xSemaphoreCreateMutex();
-    /* xTaskCreate(taskEntry, vsd_sim.vsdName, 4096, &vsd_sim, vsd_sim.vsdPriority, NULL); */
+    xTaskCreate(taskEntry, vsd_sim.vsdName, 4096, &vsd_sim, vsd_sim.vsdPriority, NULL);
 
     /*
      * Give application tasks time to register their slaves before
@@ -158,5 +158,14 @@ void app_main(void)
                  (unsigned long)et200s_slave.cnt_data_exch,
                  et200s_slave.input.data[0],
                  et200s_slave.input.data[1]);
+        ESP_LOGI(TAG_EMULATOR,
+                 "VSD    state=%d diag=%lu prm=%lu cfg=%lu dxchg=%lu "
+                 "speed=%.1f%%",
+                 slave_vsd.State.ReadyState,
+                 (unsigned long)slave_vsd.cnt_diag,
+                 (unsigned long)slave_vsd.cnt_prm,
+                 (unsigned long)slave_vsd.cnt_cfg,
+                 (unsigned long)slave_vsd.cnt_data_exch,
+                 vsd_sim.currentSpeed);
     }
 }
