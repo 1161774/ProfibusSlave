@@ -9,6 +9,8 @@ idf_component_register(
         "Serial/Serial.c"
         "Logging/pb_log.c"
         "Utility/list.c"
+        "Network/WiFi.c"
+        "Network/SNTP.c"
     INCLUDE_DIRS
         "."
 )

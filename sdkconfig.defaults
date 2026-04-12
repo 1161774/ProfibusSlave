@@ -1,0 +1,21 @@
+# sdkconfig.defaults — project-specific build settings.
+#
+# To set up a local build:
+#   1. Run "idf.py menuconfig"
+#   2. Network Configuration → Enable WiFi and SNTP → set SSID and Password
+#   3. Build normally — do NOT commit sdkconfig
+
+# ----- RS-485 / PROFIBUS UART -----
+CONFIG_ECHO_UART_PORT_NUM=2
+CONFIG_ECHO_UART_BAUD_RATE=45450
+CONFIG_ECHO_UART_RXD=22
+CONFIG_ECHO_UART_TXD=23
+CONFIG_ECHO_UART_RTS=18
+
+# ----- SNTP -----
+CONFIG_SNTP_SERVER="pool.ntp.org"
+CONFIG_SNTP_SYNC_INTERVAL_S=3600
+
+# ----- WiFi (credentials are NOT stored here) -----
+# CONFIG_WIFI_ENABLED is intentionally absent — defaults to n (disabled).
+# Enable it and set credentials locally with "idf.py menuconfig".

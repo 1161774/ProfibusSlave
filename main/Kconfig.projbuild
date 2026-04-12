@@ -49,3 +49,60 @@ menu "Echo RS485 Example Configuration"
             numbers for UART.
 
 endmenu
+
+menu "Network Configuration"
+
+    config WIFI_ENABLED
+        bool "Enable WiFi and SNTP"
+        default n
+        help
+            Connect to a WiFi access point and synchronise the system clock via
+            SNTP.  When disabled, the PROFIBUS stack runs without any network
+            activity and no WiFi credentials are required.
+
+    config WIFI_SSID
+        string "WiFi SSID"
+        default ""
+        depends on WIFI_ENABLED
+        help
+            SSID of the WiFi access point to connect to.
+            Do not commit this value — set it locally with "idf.py menuconfig".
+
+    config WIFI_PASSWORD
+        string "WiFi Password"
+        default ""
+        depends on WIFI_ENABLED
+        help
+            WPA/WPA2 passphrase.  Leave empty for open networks.
+            Do not commit this value — set it locally with "idf.py menuconfig".
+
+    config SNTP_SERVER
+        string "NTP server hostname"
+        default "pool.ntp.org"
+        depends on WIFI_ENABLED
+        help
+            Hostname of the NTP server used for time synchronisation.
+            pool.ntp.org distributes requests across a global pool of stratum-2
+            servers and is suitable for most deployments.
+
+    config SNTP_SYNC_INTERVAL_S
+        int "SNTP polling interval (seconds)"
+        range 60 86400
+        default 3600
+        depends on WIFI_ENABLED
+        help
+            How often the SNTP client contacts the NTP server.
+
+            The ESP32 crystal oscillator drifts ~25-50 ppm.  At the default of
+            3600 s (1 hour) the worst-case accumulated drift is ~180 ms, which
+            smooth-mode correction (±1 ms/s) resolves in ~3 minutes — imperceptible
+            in log timestamps.
+
+            Shorter intervals waste network traffic with little accuracy gain.
+            Longer intervals risk multi-second drift and slow smooth corrections.
+
+            Note: this value is clamped to CONFIG_LWIP_SNTP_UPDATE_DELAY (default
+            3600 s) by the LWIP stack.  To use a shorter interval, also reduce
+            CONFIG_LWIP_SNTP_UPDATE_DELAY via Component config → LWIP → SNTP.
+
+endmenu

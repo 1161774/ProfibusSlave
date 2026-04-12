@@ -4,10 +4,12 @@
  *
  * Startup sequence:
  *   1. Configure logging levels (before anything prints).
- *   2. Initialise the PROFIBUS controller (routing table).
- *   3. Create application task(s) — each registers its slave with AddSlave().
- *   4. Wait briefly for tasks to register before starting Serial.
- *   5. Initialise Serial (UART + RX/TX tasks).
+ *   2. [if WIFI_ENABLED] Initialise WiFi — asynchronous connection.
+ *      SNTP is started automatically via callback when an IP is obtained.
+ *   3. Initialise the PROFIBUS controller (routing table).
+ *   4. Create application task(s) — each registers its slave with AddSlave().
+ *   5. Wait briefly for tasks to register before starting Serial.
+ *   6. Initialise Serial (UART + RX/TX tasks).
  */
 
 #include <stdio.h>
@@ -21,6 +23,10 @@
 #include "Logging/pb_log.h"
 #include "Application/ET200S.h"
 #include "Application/VSD.h"
+#if CONFIG_WIFI_ENABLED
+#include "Network/WiFi.h"
+#include "Network/SNTP.h"
+#endif
 
 /* ================================================================== */
 /* Logging configuration                                              */
@@ -64,8 +70,8 @@ static void Configure_Logging(void)
     esp_log_level_set("*",            ESP_LOG_WARN);
 
     /* Frame hex dumps — the most useful debug output */
-    esp_log_level_set(TAG_RX,         ESP_LOG_INFO);   /* inbound frames  */
-    esp_log_level_set(TAG_TX,         ESP_LOG_INFO);   /* outbound frames */
+    esp_log_level_set(TAG_RX,         ESP_LOG_WARN);   /* inbound frames  */
+    esp_log_level_set(TAG_TX,         ESP_LOG_WARN);   /* outbound frames */
 
     /* Physical layer init messages and UART errors */
     esp_log_level_set(TAG_SERIAL,     ESP_LOG_INFO);
@@ -78,11 +84,17 @@ static void Configure_Logging(void)
     esp_log_level_set(TAG_PROTOCOL,   ESP_LOG_WARN);
 
     /* Application tasks */
-    esp_log_level_set(TAG_ET200S,     ESP_LOG_INFO);
+    esp_log_level_set(TAG_ET200S,     ESP_LOG_WARN);
     esp_log_level_set(TAG_VSD,        ESP_LOG_INFO);
 
+#if CONFIG_WIFI_ENABLED
+    /* Network / time */
+    esp_log_level_set(TAG_WIFI,       ESP_LOG_INFO);
+    esp_log_level_set(TAG_SNTP,       ESP_LOG_INFO);
+#endif
+
     /* Entry point / heartbeat */
-    esp_log_level_set(TAG_EMULATOR,   ESP_LOG_INFO);
+    esp_log_level_set(TAG_EMULATOR,   ESP_LOG_WARN);
 }
 
 /* ================================================================== */
@@ -115,6 +127,26 @@ static VSDSimulator  vsd_sim = {
 };
 
 /* ================================================================== */
+/* Network callback                                                   */
+/* ================================================================== */
+
+#if CONFIG_WIFI_ENABLED
+/*
+ * Called by the WiFi driver each time a DHCP lease is obtained.
+ * Starts SNTP on first call; subsequent calls (after a reconnect) are
+ * no-ops because the SNTP client handles reconnections internally.
+ */
+static void on_wifi_connected(void)
+{
+    static bool s_sntp_started = false;
+    if (!s_sntp_started) {
+        s_sntp_started = true;
+        SNTP_Init();
+    }
+}
+#endif
+
+/* ================================================================== */
 /* app_main                                                           */
 /* ================================================================== */
 
@@ -123,6 +155,10 @@ void app_main(void)
     Configure_Logging();
 
     ESP_LOGI(TAG_EMULATOR, "PROFIBUS Slave Emulator starting");
+
+#if CONFIG_WIFI_ENABLED
+    WiFi_Init(on_wifi_connected);
+#endif
 
     InitialiseController();
 

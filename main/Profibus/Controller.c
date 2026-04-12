@@ -76,7 +76,7 @@ void ProcessMessage(uint8_t *pMessageData, uint32_t Length)
                 xQueueSend(txQueue, &Response, pdMS_TO_TICKS(5));
             }
             else {
-                ESP_LOGW(TAG_CONTROLLER, "Didn't send %u bytes", Response.Length);
+//                ESP_LOGW(TAG_CONTROLLER, "Didn't send %u bytes", Response.Length);
             }
 
             cur = cur->next;

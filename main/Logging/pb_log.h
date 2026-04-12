@@ -50,6 +50,8 @@
 #define TAG_ET200S      "ET200S"        /* ET200S application          */
 #define TAG_VSD         "VSD"           /* KFC750 VSD application      */
 #define TAG_EMULATOR    "PBEmulator"    /* app_main / startup          */
+#define TAG_WIFI        "WiFi"          /* WiFi station                */
+#define TAG_SNTP        "SNTP"          /* SNTP time sync              */
 
 /* ------------------------------------------------------------------ */
 /* pb_log_hex                                                         */
