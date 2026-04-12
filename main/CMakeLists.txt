@@ -1,6 +1,7 @@
 set(SRCS
     "ProfibusSlaveEmulator.c"
     "Application/VSD.c"
+    "Application/KFC750/kfc750_params.c"
     "Application/ET200S.c"
     "Profibus/Protocol.c"
     "Profibus/Slave.c"

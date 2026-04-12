@@ -1,199 +1,355 @@
 /**
  * VSD.c
- * Variable Speed Drive simulator task.
+ * KFC750 Variable Speed Drive emulator task.
  *
- * This registers a profibusSlave with the controller and runs a loop
- * that:
- *   - reads output data (master → slave) written by Protocol.c on each
- *     Data_Exchange cycle (control word + speed setpoint)
- *   - updates input data (slave → master) with simulated drive status
- *     (status word + actual speed)
+ * Implements the KFC750 PROFIBUS PPO5 protocol (32 bytes I/O):
  *
- * KFC750 PPO5 data format (16 bytes each direction):
- *   Bytes 0-7:  PKW area (parameter request/response) — zeroed here
- *   Bytes 8-9:  PZD1 — Control Word / Status Word
- *   Bytes 10-11: PZD2 — Speed Setpoint / Actual Speed
- *   Bytes 12-15: PZD3-4 — additional (zeroed here)
+ *   Bytes  0-7   PKW area — parameter read/write channel
+ *   Bytes  8-9   PZD1 — Control Word (master→slave) / Status Word (slave→master)
+ *   Bytes 10-11  PZD2 — Speed Reference (master→slave, 0x4000=100%) /
+ *                        Actual frequency (slave→master, same scale)
+ *   Bytes 12-31  PZD3-12 — motor telemetry (slave→master only)
  *
- * Control Word (CW) bits relevant for basic operation:
- *   bit0  ON                   (1 = run command)
- *   bit1  No coast stop        (1 = normal)
- *   bit2  No quick stop        (1 = normal)
- *   bit3  Enable operation     (1 = normal)
- *   bit4  Enable ramp           
- *   bit5  Unfreeze ramp        
- *   bit6  Enable setpoint      
- *   bit7  Reset fault          (0→1 transition)
- *   ...
- *   0x047E = Ready to run (bits 1,2,3,4,5,6 set)
- *   0x047F = Run (bit0 also set)
+ * Control Word command encoding (bits 2:0):
+ *   0 = No action    1 = Decelerate to min freq
+ *   2 = Hold         3 = Accelerate to REF setpoint
+ *   4 = Stop (ramp to 0)
+ * Bit  7 = Fault reset (acts on 0→1 rising edge)
+ * Bit 10 = PROFIBUS control enable (must be set for PLC to control drive)
  *
- * Status Word (SW) bits:
- *   bit0  Ready to switch on
- *   bit1  Ready to operate
- *   bit2  Operation enabled
- *   bit3  Fault
- *   bit4  No coast stop
- *   bit5  No quick stop
- *   bit6  Switch on disabled
- *   bit7  Warning
- *   bit8  Speed == setpoint (at speed)
- *   bit9  Remote (under PLC control)
- *   bit10 Target reached
- *   bit11 Internal limit active
- *   ...
- *   0x0637 = Running, at speed, remote
+ * Motor simulation runs every 100 ms.  Ramp rates are derived from
+ * parameters ID111 (accel time) and ID112 (decel time).
  */
 
+#include "VSD.h"
+#include "Application/KFC750/kfc750_protocol.h"
+#include "Application/KFC750/kfc750_params.h"
+#include "Logging/pb_log.h"
 #include "esp_log.h"
-#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
-#include "VSD.h"
+#include <string.h>
 
-#define VSD_TAG "VSD"
+#define VSD_TICK_MS         100     /* simulation loop period (ms) */
 
-/*
- * KFC750 PPO5: cfg byte 0xFF = 16 words I/O = 32 bytes each direction
- *   Bytes  0-15: PKW area (8 words - parameter channel request/response)
- *   Bytes 16-17: PZD1 - Control Word / Status Word
- *   Bytes 18-19: PZD2 - Speed Setpoint / Actual Speed
- *   Bytes 20-31: PZD3-8 (additional process data, zeroed here)
- */
-#define KFC750_IO_LEN   32
-#define PKW_LEN         16  /* bytes 0-15: parameter channel  */
-#define PZD1_OFFSET     16  /* bytes 16-17: control/status word */
-#define PZD2_OFFSET     18  /* bytes 18-19: setpoint/actual   */
+/* Simulated electrical ratings */
+#define RATED_VOLTAGE_V     220.0f  /* output voltage at max frequency */
+#define DC_BUS_VOLTAGE_V    310.0f  /* DC bus ≈ 230 VAC × √2 */
+#define RATED_CURRENT_A     5.0f    /* rated motor current at full load */
+#define POWER_FACTOR        0.85f   /* typical induction motor power factor */
 
-/* Speed scaling: 0x4000 (16384) = 100% of rated speed */
-#define SPEED_SCALE     16384
+/* ------------------------------------------------------------------ */
+/* Big-endian helpers                                                  */
+/* ------------------------------------------------------------------ */
 
-static void UpdateInputData(VSDSimulator *vsd)
+static inline uint16_t rd16(const uint8_t *b, int off)
 {
-    profibusSlave *slave = vsd->profibusSlave;
-
-    /* Determine status word based on VSD state */
-    uint16_t statusWord;
-    switch (vsd->state) {
-    case RAMPING_UP:
-    case RAMPING_DOWN:
-        statusWord = 0x0237;  /* Running, not yet at speed */
-        break;
-    case AT_SPEED:
-        statusWord = 0x0637;  /* Running, at speed, remote */
-        break;
-    case STOPPED:
-    default:
-        statusWord = 0x0231;  /* Ready, stopped */
-        break;
-    }
-
-    /* Actual speed as fraction of rated (scaled) */
-    int16_t actualSpeed = (int16_t)(vsd->currentSpeed * SPEED_SCALE / 100.0f);
-
-    uint8_t *in = slave->input.data;
-    memset(in, 0, KFC750_IO_LEN);
-    slave->input.len = KFC750_IO_LEN;
-
-    /* PKW area (bytes 0-7): leave as zeros (no parameter request active) */
-
-    /* PZD1: Status Word (big-endian) */
-    in[PZD1_OFFSET    ] = (uint8_t)(statusWord >> 8);
-    in[PZD1_OFFSET + 1] = (uint8_t)(statusWord & 0xFF);
-
-    /* PZD2: Actual Speed (big-endian) */
-    in[PZD2_OFFSET    ] = (uint8_t)(actualSpeed >> 8);
-    in[PZD2_OFFSET + 1] = (uint8_t)(actualSpeed & 0xFF);
+    return (uint16_t)(((uint16_t)b[off] << 8) | b[off + 1]);
 }
 
-static void ProcessOutputData(VSDSimulator *vsd)
+static inline int16_t rds16(const uint8_t *b, int off)
 {
-    profibusSlave *slave = vsd->profibusSlave;
+    return (int16_t)rd16(b, off);
+}
 
-    if (slave->output.len < PZD1_OFFSET + 2) return;  /* Not enough data yet */
+static inline uint32_t rd32(const uint8_t *b, int off)
+{
+    return ((uint32_t)b[off    ] << 24) | ((uint32_t)b[off + 1] << 16) |
+           ((uint32_t)b[off + 2] <<  8) |  (uint32_t)b[off + 3];
+}
 
-    uint8_t *out = slave->output.data;
+static inline void wr16(uint8_t *b, int off, uint16_t v)
+{
+    b[off    ] = (uint8_t)(v >> 8);
+    b[off + 1] = (uint8_t)(v);
+}
 
-    /* PZD1: Control Word */
-    uint16_t ctrlWord = ((uint16_t)out[PZD1_OFFSET] << 8) | out[PZD1_OFFSET + 1];
+static inline void wr32(uint8_t *b, int off, uint32_t v)
+{
+    b[off    ] = (uint8_t)(v >> 24);
+    b[off + 1] = (uint8_t)(v >> 16);
+    b[off + 2] = (uint8_t)(v >>  8);
+    b[off + 3] = (uint8_t)(v);
+}
 
-    /* PZD2: Speed Setpoint (scaled, big-endian) */
-    int16_t spScaled = (int16_t)(((uint16_t)out[PZD2_OFFSET] << 8) | out[PZD2_OFFSET + 1]);
-    float   setpoint = (float)spScaled * 100.0f / (float)SPEED_SCALE;
+/* ------------------------------------------------------------------ */
+/* PKW channel — parameter read/write                                 */
+/* ------------------------------------------------------------------ */
 
-    bool runCmd = (ctrlWord & 0x0001) != 0;
+static void ProcessPKW(VSDSimulator *vsd, const uint8_t *out)
+{
+    uint16_t pke     = rd16(out, KFC750_PKE_OFFSET);
+    uint16_t ind     = rd16(out, KFC750_IND_OFFSET);
+    uint32_t pwe     = rd32(out, KFC750_PWE_OFFSET);
+    uint8_t  reqType = (uint8_t)((pke >> 12) & 0x0Fu);
+    uint16_t paramId = pke & 0x0FFFu;
 
-    ESP_LOGD(VSD_TAG, "%s: CW=0x%04X SP=%.1f%% run=%d",
-             vsd->vsdName, ctrlWord, setpoint, runCmd);
+    if (reqType == PKE_REQ_NO_REQUEST) {
+        /* No request pending — clear any previous response */
+        vsd->pkwRespPke = 0x0000;
+        vsd->pkwRespInd = 0x0000;
+        vsd->pkwRespPwe = 0x00000000;
+        return;
+    }
 
-    if (runCmd) {
-        vsd->speedSetpoint = setpoint;
+    if (paramId == 0 || paramId >= KFC750_PARAM_COUNT) {
+        ESP_LOGW(TAG_VSD, "%s: PKW invalid ID %u", vsd->vsdName, paramId);
+        vsd->pkwRespPke = (uint16_t)((PKE_RESP_REJECTED << 12) | (paramId & 0x0FFFu));
+        vsd->pkwRespInd = ind;
+        vsd->pkwRespPwe = 0x00000003; /* error: parameter not supported */
+        return;
+    }
+
+    if (reqType == PKE_REQ_READ_WORD || reqType == PKE_REQ_READ_DWORD) {
+        uint32_t val = KFC750_Params_Read(&vsd->params, paramId);
+        vsd->pkwRespPke = (uint16_t)((PKE_RESP_WORD_VALUE << 12) | paramId);
+        vsd->pkwRespInd = ind;
+        vsd->pkwRespPwe = val;
+        ESP_LOGD(TAG_VSD, "%s: PKW read  P%u = %lu",
+                 vsd->vsdName, paramId, (unsigned long)val);
+
+    } else if (reqType == PKE_REQ_WRITE_WORD || reqType == PKE_REQ_WRITE_DWORD) {
+        KFC750_Params_Write(&vsd->params, paramId, pwe);
+        vsd->pkwRespPke = (uint16_t)((PKE_RESP_WORD_VALUE << 12) | paramId);
+        vsd->pkwRespInd = ind;
+        vsd->pkwRespPwe = pwe;
+        ESP_LOGI(TAG_VSD, "%s: PKW write P%u = %lu",
+                 vsd->vsdName, paramId, (unsigned long)pwe);
+
     } else {
-        vsd->speedSetpoint = 0.0f;
+        ESP_LOGW(TAG_VSD, "%s: PKW unsupported request type 0x%X",
+                 vsd->vsdName, reqType);
+        vsd->pkwRespPke = (uint16_t)((PKE_RESP_REJECTED << 12) | paramId);
+        vsd->pkwRespInd = ind;
+        vsd->pkwRespPwe = 0x00000001; /* error: function not supported */
     }
 }
+
+/* ------------------------------------------------------------------ */
+/* PZD channel — control word + speed reference                       */
+/* ------------------------------------------------------------------ */
+
+static void ProcessPZD(VSDSimulator *vsd, const uint8_t *out)
+{
+    uint16_t cw      = rd16 (out, KFC750_PZD1_OFFSET);
+    int16_t  ref     = rds16(out, KFC750_PZD2_OFFSET);
+    uint16_t prevCw  = vsd->ctrlWord;
+    vsd->ctrlWord    = cw;
+
+    /* Fault reset: rising edge on bit 7 */
+    if ((cw & KFC750_CW_FAULT_RESET) && !(prevCw & KFC750_CW_FAULT_RESET)) {
+        if (vsd->faultCode) {
+            ESP_LOGI(TAG_VSD, "%s: fault %u reset via CW", vsd->vsdName, vsd->faultCode);
+            vsd->faultCode = 0;
+        }
+    }
+
+    if (!(cw & KFC750_CW_PROFIBUS_ENABLE)) {
+        /* PROFIBUS control not enabled — drive ignores PLC commands */
+        vsd->targetFreq = 0.0f;
+        return;
+    }
+
+    float maxFreq = (float)KFC750_Params_Read(&vsd->params, KFC750_PARAM_MAX_FREQ) / 100.0f;
+    float minFreq = (float)KFC750_Params_Read(&vsd->params, KFC750_PARAM_MIN_FREQ) / 100.0f;
+    if (maxFreq < 1.0f) maxFreq = 50.0f; /* safety guard */
+
+    /* Convert REF word (−0x4000…+0x4000) to Hz */
+    float refFreq = (float)ref * maxFreq / (float)KFC750_SPEED_SCALE;
+    if (refFreq < 0.0f)    refFreq = 0.0f;
+    if (refFreq > maxFreq) refFreq = maxFreq;
+
+    uint8_t cmd = (uint8_t)(cw & KFC750_CW_CMD_MASK);
+    switch (cmd) {
+
+    case KFC750_CW_CMD_ACCEL:
+        vsd->targetFreq = refFreq;
+        /* Enforce minimum: if non-zero setpoint is below min, clamp to min */
+        if (vsd->targetFreq > 0.0f && vsd->targetFreq < minFreq)
+            vsd->targetFreq = minFreq;
+        break;
+
+    case KFC750_CW_CMD_DECEL:
+        vsd->targetFreq = minFreq;
+        break;
+
+    case KFC750_CW_CMD_HOLD:
+        vsd->targetFreq = vsd->currentFreq; /* freeze at current value */
+        break;
+
+    case KFC750_CW_CMD_STOP:
+    case KFC750_CW_CMD_NO_ACTION:
+    default:
+        vsd->targetFreq = 0.0f;
+        break;
+    }
+
+    ESP_LOGD(TAG_VSD, "%s: CW=0x%04X cmd=%u ref=%.1f Hz target=%.1f Hz",
+             vsd->vsdName, cw, cmd, refFreq, vsd->targetFreq);
+}
+
+/* ------------------------------------------------------------------ */
+/* Motor simulation — one tick                                        */
+/* ------------------------------------------------------------------ */
+
+static void SimulateMotor(VSDSimulator *vsd)
+{
+    /* Faulted drive cannot run */
+    if (vsd->faultCode) vsd->targetFreq = 0.0f;
+
+    float maxFreq   = (float)KFC750_Params_Read(&vsd->params, KFC750_PARAM_MAX_FREQ)   / 100.0f;
+    float accelTime = (float)KFC750_Params_Read(&vsd->params, KFC750_PARAM_ACCEL_TIME) /  10.0f;
+    float decelTime = (float)KFC750_Params_Read(&vsd->params, KFC750_PARAM_DECEL_TIME) /  10.0f;
+
+    /* Guard against zero/corrupt parameter values */
+    if (maxFreq   < 1.0f) maxFreq   = 50.0f;
+    if (accelTime < 0.1f) accelTime = 10.0f;
+    if (decelTime < 0.1f) decelTime = 10.0f;
+
+    /* Hz change allowed in one tick */
+    float accelStep = maxFreq / accelTime * ((float)VSD_TICK_MS / 1000.0f);
+    float decelStep = maxFreq / decelTime * ((float)VSD_TICK_MS / 1000.0f);
+
+    float diff = vsd->targetFreq - vsd->currentFreq;
+
+    if (diff > accelStep) {
+        vsd->currentFreq += accelStep;
+        vsd->state = RAMPING_UP;
+    } else if (diff < -decelStep) {
+        vsd->currentFreq -= decelStep;
+        vsd->state = RAMPING_DOWN;
+    } else {
+        vsd->currentFreq = vsd->targetFreq;
+        vsd->state       = (vsd->targetFreq < 0.01f) ? STOPPED : AT_SPEED;
+    }
+
+    /* Keep legacy % fields in sync for heartbeat logging */
+    vsd->currentSpeed  = (maxFreq > 0.0f) ? (vsd->currentFreq / maxFreq * 100.0f) : 0.0f;
+    vsd->speedSetpoint = (maxFreq > 0.0f) ? (vsd->targetFreq  / maxFreq * 100.0f) : 0.0f;
+}
+
+/* ------------------------------------------------------------------ */
+/* Status Word                                                         */
+/* ------------------------------------------------------------------ */
+
+static uint16_t BuildStatusWord(const VSDSimulator *vsd)
+{
+    uint16_t sw = 0;
+
+    if (!vsd->faultCode) sw |= KFC750_SW_READY;
+    if ( vsd->faultCode) sw |= KFC750_SW_FAULT;
+
+    if (vsd->currentFreq > 0.01f) {
+        sw |= KFC750_SW_RUNNING;
+    } else {
+        sw |= KFC750_SW_ZERO_SPEED;
+    }
+
+    if (vsd->state == AT_SPEED   && vsd->currentFreq > 0.01f) sw |= KFC750_SW_AT_SPEED;
+    if (vsd->state == RAMPING_UP)   sw |= KFC750_SW_ACCEL;
+    if (vsd->state == RAMPING_DOWN) sw |= KFC750_SW_DECEL;
+
+    /* PROFIBUS link always active once in Data_Exchange */
+    sw |= KFC750_SW_REMOTE;
+    sw |= KFC750_SW_PROFIBUS_OK;
+
+    return sw;
+}
+
+/* ------------------------------------------------------------------ */
+/* Build input buffer (slave → master)                                */
+/* ------------------------------------------------------------------ */
+
+static void BuildInputData(VSDSimulator *vsd)
+{
+    profibusSlave *slave = vsd->profibusSlave;
+    uint8_t       *in   = slave->input.data;
+
+    memset(in, 0, KFC750_FRAME_LEN);
+    slave->input.len = KFC750_FRAME_LEN;
+
+    /* PKW response */
+    wr16(in, KFC750_PKE_OFFSET, vsd->pkwRespPke);
+    wr16(in, KFC750_IND_OFFSET, vsd->pkwRespInd);
+    wr32(in, KFC750_PWE_OFFSET, vsd->pkwRespPwe);
+
+    /* PZD1: Status Word */
+    vsd->statusWord = BuildStatusWord(vsd);
+    wr16(in, KFC750_PZD1_OFFSET, vsd->statusWord);
+
+    /* PZD2: Actual frequency (same scale as REF) */
+    float maxFreq = (float)KFC750_Params_Read(&vsd->params, KFC750_PARAM_MAX_FREQ) / 100.0f;
+    if (maxFreq < 1.0f) maxFreq = 50.0f;
+    int16_t act = (int16_t)(vsd->currentFreq * (float)KFC750_SPEED_SCALE / maxFreq);
+    wr16(in, KFC750_PZD2_OFFSET, (uint16_t)act);
+
+    /* PZD3: Output frequency Hz×100 */
+    wr16(in, KFC750_PZD3_OFFSET, (uint16_t)(vsd->currentFreq * 100.0f));
+
+    /* PZD4: Output voltage (V/Hz V/f curve — linear to max) */
+    float volts = (maxFreq > 0.0f) ? (RATED_VOLTAGE_V * vsd->currentFreq / maxFreq) : 0.0f;
+    wr16(in, KFC750_PZD4_OFFSET, (uint16_t)volts);
+
+    /* PZD5: Output current A×10 (proportional to load) */
+    float amps = (maxFreq > 0.0f) ? (RATED_CURRENT_A * vsd->currentFreq / maxFreq) : 0.0f;
+    wr16(in, KFC750_PZD5_OFFSET, (uint16_t)(amps * 10.0f));
+
+    /* PZD6: DC bus voltage (V) — constant once energised */
+    wr16(in, KFC750_PZD6_OFFSET, (uint16_t)DC_BUS_VOLTAGE_V);
+
+    /* PZD7: Active fault code */
+    wr16(in, KFC750_PZD7_OFFSET, vsd->faultCode);
+
+    /* PZD8: Output power kW×10  (3-phase: P = √3 × V × I × cosφ) */
+    float power_kw = (1.732f * volts * amps * POWER_FACTOR) / 1000.0f;
+    wr16(in, KFC750_PZD8_OFFSET, (uint16_t)(power_kw * 10.0f));
+
+    /* PZD9: Target frequency Hz×100 */
+    wr16(in, KFC750_PZD9_OFFSET, (uint16_t)(vsd->targetFreq * 100.0f));
+
+    /* PZD10-12: AI1, AI2, reserved — left zero */
+}
+
+/* ------------------------------------------------------------------ */
+/* Main simulation loop                                               */
+/* ------------------------------------------------------------------ */
 
 static void RunVSD(VSDSimulator *vsd)
 {
-    const float RAMP_RATE = 2.0f;   /* % per 100 ms */
-
     while (1) {
         if (xSemaphoreTake(vsd->vsdMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
 
-            /* Read outputs from master and update setpoint */
-            if (vsd->profibusSlave->State.ReadyState == SS_DXCHG) {
-                ProcessOutputData(vsd);
+            if (vsd->profibusSlave->State.ReadyState == SS_DXCHG &&
+                vsd->profibusSlave->output.len >= KFC750_FRAME_LEN) {
+
+                const uint8_t *out = vsd->profibusSlave->output.data;
+                ProcessPKW(vsd, out);
+                ProcessPZD(vsd, out);
             }
 
-            /* Simulate drive ramp */
-            if (vsd->currentSpeed < vsd->speedSetpoint) {
-                vsd->currentSpeed += RAMP_RATE;
-                if (vsd->currentSpeed >= vsd->speedSetpoint) {
-                    vsd->currentSpeed = vsd->speedSetpoint;
-                    vsd->state = AT_SPEED;
-                } else {
-                    vsd->state = RAMPING_UP;
-                }
-            } else if (vsd->currentSpeed > vsd->speedSetpoint) {
-                vsd->currentSpeed -= RAMP_RATE;
-                if (vsd->currentSpeed <= vsd->speedSetpoint) {
-                    vsd->currentSpeed = vsd->speedSetpoint;
-                    vsd->state = (vsd->speedSetpoint == 0.0f) ? STOPPED : AT_SPEED;
-                } else {
-                    vsd->state = RAMPING_DOWN;
-                }
-            }
-
-            /* Update input data for next Data_Exchange response */
-            UpdateInputData(vsd);
+            SimulateMotor(vsd);
+            BuildInputData(vsd);
 
             xSemaphoreGive(vsd->vsdMutex);
         }
 
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(VSD_TICK_MS));
     }
 }
 
-void processProfibusCommand(VSDSimulator *vsd, const char *command)
-{
-    if (strncmp(command, "START", 5) == 0) {
-        vsd->speedSetpoint = 50.0f;
-    } else if (strncmp(command, "STOP", 4) == 0) {
-        vsd->speedSetpoint = 0.0f;
-    } else if (strncmp(command, "SET_SPEED", 9) == 0) {
-        float sp;
-        if (sscanf(command, "SET_SPEED %f", &sp) == 1) {
-            vsd->speedSetpoint = sp;
-        }
-    }
-}
+/* ------------------------------------------------------------------ */
+/* Task entry                                                         */
+/* ------------------------------------------------------------------ */
 
 void taskEntry(void *pvParameters)
 {
     VSDSimulator *vsd = (VSDSimulator *)pvParameters;
 
-    /* Initialise slave state */
+    /* Initialise parameter table with factory defaults */
+    KFC750_Params_Init(&vsd->params);
+
+    /* Initialise PROFIBUS slave state */
     vsd->profibusSlave->State.ReadyState = SS_POWERON;
     vsd->profibusSlave->State.Frozen     = 0;
     vsd->profibusSlave->State.Sync       = 0;
@@ -207,32 +363,37 @@ void taskEntry(void *pvParameters)
     vsd->profibusSlave->cnt_cfg          = 0;
     vsd->profibusSlave->cnt_data_exch    = 0;
 
-    /* Identity from kfc750.gsd: Ident_Number = 0x7050 */
-    vsd->profibusSlave->Config.Address  = vsd->profibusAddress;
-    vsd->profibusSlave->Config.ID_HIGH  = 0x70;
-    vsd->profibusSlave->Config.ID_LOW   = 0x50;
+    /* KFC750 GSD identity: Ident_Number = 0x7050 */
+    vsd->profibusSlave->Config.Address = vsd->profibusAddress;
+    vsd->profibusSlave->Config.ID_HIGH = 0x70;
+    vsd->profibusSlave->Config.ID_LOW  = 0x50;
 
-    /* Pre-set I/O lengths for KFC750 PPO5 (cfg byte 0xFF = 16 bytes I/O).
-     * Protocol.c will also derive these from Chk_Cfg, but setting them
-     * here means input data is ready from the first cycle. */
-    vsd->profibusSlave->input.len  = KFC750_IO_LEN;
-    vsd->profibusSlave->output.len = KFC750_IO_LEN;
-    memset(vsd->profibusSlave->input.data,  0, KFC750_IO_LEN);
-    memset(vsd->profibusSlave->output.data, 0, KFC750_IO_LEN);
+    /* PPO5 I/O size: 32 bytes each direction */
+    vsd->profibusSlave->input.len  = KFC750_FRAME_LEN;
+    vsd->profibusSlave->output.len = KFC750_FRAME_LEN;
+    memset(vsd->profibusSlave->input.data,  0, KFC750_FRAME_LEN);
+    memset(vsd->profibusSlave->output.data, 0, KFC750_FRAME_LEN);
 
-    /* Optionally enforce strict Chk_Cfg validation against KFC750 PPO5 cfg.
-     * KFC750 PPO5 module has a single cfg byte: 0xFF. */
-    vsd->profibusSlave->cfg_data[0] = 0xFF;
-    vsd->profibusSlave->cfg_len     = 1;
-    vsd->profibusSlave->cfg_strict  = 0;  /* Set to 1 to enforce strict match */
+    /* Accept any Chk_Cfg from the master without strict validation */
+    vsd->profibusSlave->cfg_strict = 0;
 
-    /* Populate initial status word so master gets sensible data immediately */
-    UpdateInputData(vsd);
+    /* Initialise drive runtime state */
+    vsd->currentFreq = 0.0f;
+    vsd->targetFreq  = 0.0f;
+    vsd->ctrlWord    = 0;
+    vsd->faultCode   = 0;
+    vsd->pkwRespPke  = 0;
+    vsd->pkwRespInd  = 0;
+    vsd->pkwRespPwe  = 0;
 
-    /* Register with the controller */
+    /* Pre-fill input buffer so first Data_Exchange returns valid data */
+    BuildInputData(vsd);
+
+    /* Register with PROFIBUS controller */
     AddSlave(vsd->profibusAddress, vsd->profibusSlave);
 
-    ESP_LOGI(VSD_TAG, "Starting VSD '%s' at PROFIBUS addr=%u ident=0x7050",
+    ESP_LOGI(TAG_VSD, "Starting '%s' at PROFIBUS addr=%u ident=0x7050 "
+             "(KFC750 PPO5, 32-byte I/O)",
              vsd->vsdName, vsd->profibusAddress);
 
     RunVSD(vsd);
