@@ -5,6 +5,9 @@
 #   2. Network Configuration → Enable WiFi and SNTP → set SSID and Password
 #   3. Build normally — do NOT commit sdkconfig
 
+# ----- Network hostname -----
+CONFIG_LWIP_LOCAL_HOSTNAME="profibus-slave"
+
 # ----- RS-485 / PROFIBUS UART -----
 CONFIG_ECHO_UART_PORT_NUM=2
 CONFIG_ECHO_UART_BAUD_RATE=45450
